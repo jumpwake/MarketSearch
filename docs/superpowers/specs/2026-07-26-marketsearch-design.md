@@ -56,7 +56,7 @@ The ordering is load-bearing. Dedupe before prefilter means a listing is examine
 | `extract` | Listing detail + criteria → attributes + verdict | Anthropic SDK |
 | `notify` | Verdicts and changes → email and SMS | SMTP, Twilio |
 | `pipeline` | Wires the above in order | all |
-| `cli` | `run`, `login`, `test-search`, `history` | `pipeline` |
+| `cli` | `run`, `login`, `test-search`, `history`, `preview`, `replay` | `pipeline` |
 
 The critical boundary is `sources/facebook`: it is the only file that knows what a Facebook page looks like. Everything downstream speaks `RawListing` and `ListingDetail`. When Facebook changes its markup, one file changes, and every test for prefilter, extraction, storage, and email keeps passing because none of them touch a browser.
 
@@ -97,6 +97,7 @@ extraction:
   max_extractions_per_run: 25   # safety valve against a runaway run
 
 notifications:
+  enabled: false                # master switch — ships false; see Shakedown and rollout
   email:
     to: kbowsher@gmail.com
     from: marketsearch@example.com
@@ -176,6 +177,12 @@ SQLite file beside the config. **Every listing ID ever seen is recorded, matched
 `listing_id` (Facebook's, primary key), `search_name`, `first_seen_at`, `last_seen_at`, `title`, `price_cents`, `location`, `url`, `thumbnail_url`, `fingerprint`, `stage` (`prefiltered_out` | `extracted` | `matched` | `pending`), `reject_reason`, `watched` (bool), `last_change_check_at`.
 
 Step 2 of the run is a single `WHERE listing_id NOT IN (...)` against this table, so a rejected listing costs nothing forever after — no detail fetch, no Claude call, no email.
+
+### `listing_details`
+
+`listing_id`, `description` (raw text), `structured_fields` (JSON — whatever Facebook's payload exposes: condition, category, seller info), `photo_urls` (JSON), `fetched_at`, `content_hash`.
+
+The raw detail is stored, not just the attributes derived from it. This is what makes `replay` possible (see Shakedown and rollout): criteria can be re-evaluated against real historical listings without touching Facebook again. It also gives the description diffing needed for watched-listing change detection. Cost is a kilobyte or two per listing — a few megabytes over years.
 
 ### `extractions`
 
@@ -269,7 +276,46 @@ The parts worth testing are the parts that encode judgment, not the parts that t
 **Two manual commands cover what tests cannot:**
 
 - `marketsearch test-search "Bobcat T770"` — live fetch, prints what was parsed. The smoke test after any Facebook breakage.
-- `marketsearch run --dry-run` — a complete real sweep that writes nothing and prints exactly what it would have alerted on. This is the tool for tuning criteria, since it allows iterating on the YAML without consuming listings that would then count as seen.
+- `marketsearch run --dry-run` — a complete real sweep that writes nothing and prints exactly what it would have alerted on. Used for the very first runs, before there is any stored history to `replay` against.
+
+## Shakedown and rollout
+
+Nothing gets emailed until the tool has demonstrably earned it. Three capabilities support that, addressing three distinct needs.
+
+### Alerts off by default
+
+`notifications.enabled` ships as `false`. The tool runs its full schedule — scraping, extracting, writing every decision to the database — and simply does not send. It is therefore impossible to accidentally email during setup, and the shakedown period accumulates genuine history rather than throwaway output.
+
+### `marketsearch preview`
+
+Renders the last run's email — the real HTML, produced by the same code path that would send it, photos embedded — to a file and opens it in a browser. Not a terminal summary that approximates the email; the actual email. `--run <id>` opens any earlier run instead.
+
+### `marketsearch replay`
+
+Re-runs extraction over stored listings using the *current* criteria, and prints a verdict diff:
+
+```
+$ marketsearch replay --search bobcat-t770 --since 30d
+
+bobcat-t770 — 34 listings replayed
+  → match        12  (was 9)   +3
+  → unverifiable  4  (was 7)   -3
+  → no_match     18  (was 18)
+
+  CHANGED:
+  1094… 2019 T770, 2,400 hrs, $38,000   unverifiable → match   (2-speed now confirmed)
+  1102… 2016 T770, 2,900 hrs, $31,500   match → no_match       (undercarriage "needs work")
+```
+
+This is what makes criteria tuning practical. Edit a sentence in the YAML, replay, and see exactly which listings moved and why — without touching Facebook once. Two things follow from that: every replay carries zero detection risk, and tuning happens against real listings already reviewed rather than hypotheticals. Cost is a couple of cents per replayed listing. `replay` reads `listing_details` and writes new rows to `extractions`; it never re-scrapes.
+
+### The rollout sequence
+
+1. `marketsearch run --dry-run` — confirm scraping and parsing work at all
+2. Run on schedule with `notifications.enabled: false` for several days
+3. `marketsearch preview` — read what it would have sent
+4. Edit criteria → `marketsearch replay` → repeat until the verdicts look right
+5. Set `notifications.enabled: true`
 
 ## Decisions
 
@@ -288,6 +334,8 @@ The parts worth testing are the parts that encode judgment, not the parts that t
 | Relists | Fingerprint suppression, 60-day window; price drops alert | Kills repost spam without hiding genuine price movement |
 | Favorites | Read Facebook's own saved-items list | Zero new infrastructure; works from the phone; un-save is the unfollow |
 | FB account | User's primary account | Required for saved-items sync; risk accepted, mitigated by conservative defaults |
+| Rollout | Alerts off by default; `preview` and `replay` for tuning | Trust is earned against real listings before anything reaches the inbox |
+| Raw detail storage | Store description and fields, not just derived attributes | Enables `replay` tuning with no re-scraping, and description diffing for watched listings |
 
 ## Out of scope
 
