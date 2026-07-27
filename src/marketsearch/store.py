@@ -8,13 +8,14 @@ than the disk.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from marketsearch.models import RawListing
+from marketsearch.models import ListingDetail, RawListing
 
 SCHEMA_VERSION = 1
 
@@ -41,6 +42,62 @@ CREATE TABLE IF NOT EXISTS listings (
 
 CREATE INDEX IF NOT EXISTS idx_listings_fingerprint ON listings(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_listings_watched ON listings(watched);
+
+CREATE TABLE IF NOT EXISTS listing_details (
+    listing_id        TEXT PRIMARY KEY REFERENCES listings(listing_id),
+    description       TEXT NOT NULL,
+    structured_fields TEXT NOT NULL,
+    photo_urls        TEXT NOT NULL,
+    distance_miles    REAL,
+    content_hash      TEXT NOT NULL,
+    fetched_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS extractions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id    TEXT NOT NULL REFERENCES listings(listing_id),
+    attributes    TEXT NOT NULL,
+    verdict       TEXT NOT NULL,
+    confidence    REAL NOT NULL,
+    reasoning     TEXT NOT NULL,
+    unknowns      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_cents    REAL NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_extractions_listing ON extractions(listing_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    sent_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_lookup
+    ON notifications(listing_id, channel, kind, status);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT,
+    found       INTEGER NOT NULL DEFAULT 0,
+    new         INTEGER NOT NULL DEFAULT 0,
+    prefiltered INTEGER NOT NULL DEFAULT 0,
+    extracted   INTEGER NOT NULL DEFAULT 0,
+    matched     INTEGER NOT NULL DEFAULT 0,
+    errors      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -65,6 +122,18 @@ class ListingRow:
     first_seen_at: str
     last_seen_at: str
     last_change_check_at: str | None
+
+
+@dataclass(frozen=True)
+class ExtractionRow:
+    listing_id: str
+    attributes: dict
+    verdict: str
+    confidence: float
+    reasoning: str
+    unknowns: list[str]
+    model: str
+    created_at: str
 
 
 def _row_to_listing(row: sqlite3.Row) -> ListingRow:
@@ -189,3 +258,166 @@ class Store:
             (fp, exclude_listing_id, cutoff),
         )
         return cur.fetchone() is not None
+
+    # ---- listing details -----------------------------------------------
+
+    def save_detail(self, detail: ListingDetail, content_hash: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO listing_details (listing_id, description, structured_fields,
+                                         photo_urls, distance_miles, content_hash, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                description = excluded.description,
+                structured_fields = excluded.structured_fields,
+                photo_urls = excluded.photo_urls,
+                distance_miles = excluded.distance_miles,
+                content_hash = excluded.content_hash,
+                fetched_at = excluded.fetched_at
+            """,
+            (
+                detail.listing_id, detail.description,
+                json.dumps(detail.structured_fields), json.dumps(detail.photo_urls),
+                detail.distance_miles, content_hash, utcnow(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_detail(self, listing_id: str) -> ListingDetail | None:
+        cur = self._conn.execute(
+            "SELECT * FROM listing_details WHERE listing_id = ?", (listing_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return ListingDetail(
+            listing_id=row["listing_id"],
+            description=row["description"],
+            structured_fields=json.loads(row["structured_fields"]),
+            photo_urls=json.loads(row["photo_urls"]),
+            distance_miles=row["distance_miles"],
+        )
+
+    def get_detail_content_hash(self, listing_id: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT content_hash FROM listing_details WHERE listing_id = ?", (listing_id,)
+        )
+        row = cur.fetchone()
+        return row["content_hash"] if row else None
+
+    # ---- extractions ----------------------------------------------------
+
+    def save_extraction(
+        self, listing_id: str, attributes: dict, verdict: str, confidence: float,
+        reasoning: str, unknowns: list[str], model: str, input_tokens: int,
+        output_tokens: int, cost_cents: float,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO extractions (listing_id, attributes, verdict, confidence, reasoning,
+                                     unknowns, model, input_tokens, output_tokens,
+                                     cost_cents, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                listing_id, json.dumps(attributes), verdict, confidence, reasoning,
+                json.dumps(unknowns), model, input_tokens, output_tokens,
+                cost_cents, utcnow(),
+            ),
+        )
+        self._conn.commit()
+
+    def latest_extraction(self, listing_id: str) -> ExtractionRow | None:
+        cur = self._conn.execute(
+            "SELECT * FROM extractions WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+            (listing_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return ExtractionRow(
+            listing_id=row["listing_id"],
+            attributes=json.loads(row["attributes"]),
+            verdict=row["verdict"],
+            confidence=row["confidence"],
+            reasoning=row["reasoning"],
+            unknowns=json.loads(row["unknowns"]),
+            model=row["model"],
+            created_at=row["created_at"],
+        )
+
+    # ---- watched (mirrors Facebook's saved list) -------------------------
+
+    def set_watched_ids(self, ids: set[str]) -> None:
+        """Make the DB reflect Facebook's saved list exactly. Facebook is the
+        source of truth, so un-saving there clears the flag here."""
+        self._conn.execute("UPDATE listings SET watched = 0 WHERE watched = 1")
+        for listing_id in ids:
+            self._conn.execute(
+                "UPDATE listings SET watched = 1 WHERE listing_id = ?", (listing_id,)
+            )
+        self._conn.commit()
+
+    def watched_listing_ids(self) -> set[str]:
+        cur = self._conn.execute("SELECT listing_id FROM listings WHERE watched = 1")
+        return {r["listing_id"] for r in cur.fetchall()}
+
+    # ---- notifications --------------------------------------------------
+
+    def already_notified(self, listing_id: str, channel: str, kind: str) -> bool:
+        cur = self._conn.execute(
+            """
+            SELECT 1 FROM notifications
+            WHERE listing_id = ? AND channel = ? AND kind = ? AND status = 'sent'
+            LIMIT 1
+            """,
+            (listing_id, channel, kind),
+        )
+        return cur.fetchone() is not None
+
+    def record_notification(
+        self, listing_id: str, channel: str, kind: str, status: str
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO notifications (listing_id, channel, kind, status, sent_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (listing_id, channel, kind, status, utcnow()),
+        )
+        self._conn.commit()
+
+    # ---- runs ------------------------------------------------------------
+
+    def start_run(self) -> int:
+        cur = self._conn.execute("INSERT INTO runs (started_at) VALUES (?)", (utcnow(),))
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def finish_run(self, run_id: int, counters: dict[str, int]) -> None:
+        self._conn.execute(
+            """
+            UPDATE runs SET ended_at = ?, found = ?, new = ?, prefiltered = ?,
+                            extracted = ?, matched = ?, errors = ?
+            WHERE run_id = ?
+            """,
+            (
+                utcnow(), counters.get("found", 0), counters.get("new", 0),
+                counters.get("prefiltered", 0), counters.get("extracted", 0),
+                counters.get("matched", 0), counters.get("errors", 0), run_id,
+            ),
+        )
+        self._conn.commit()
+
+    # ---- key/value state -------------------------------------------------
+
+    def get_state(self, key: str) -> str | None:
+        cur = self._conn.execute("SELECT value FROM app_state WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
