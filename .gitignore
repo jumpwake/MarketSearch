@@ -3,6 +3,9 @@
 *.db-journal
 chrome-profile/
 debug/
+logs/
+preview.html
+marketsearch.lock
 __pycache__/
 *.egg-info/
 .venv/
