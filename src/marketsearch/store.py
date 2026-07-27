@@ -443,6 +443,18 @@ class Store:
         )
         self._conn.commit()
 
+    def recent_runs(self, limit: int) -> list[sqlite3.Row]:
+        """Most recent runs, newest first. Public so the CLI does not have to
+        reach into the connection."""
+        cur = self._conn.execute(
+            "SELECT * FROM runs ORDER BY run_id DESC LIMIT ?", (limit,)
+        )
+        return cur.fetchall()
+
+    def get_run(self, run_id: int) -> sqlite3.Row | None:
+        cur = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+        return cur.fetchone()
+
     # ---- key/value state -------------------------------------------------
 
     def get_state(self, key: str) -> str | None:
