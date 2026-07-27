@@ -780,7 +780,7 @@ git commit -m "feat: content fingerprinting for relist suppression"
   - `Store.fingerprint_seen_before(fp: str, exclude_listing_id: str, within_days: int) -> bool`
   - `Store.update_price(listing_id: str, price_cents: int | None) -> None`
 
-Valid `stage` values, used consistently by every later task: `"prefiltered_out"`, `"pending"`, `"extracted"`, `"matched"`.
+Valid `stage` values, used consistently by every later task: `"prefiltered_out"`, `"pending"`, `"extracted"`, `"matched"`. Task 15 adds a fifth, `"failed"`, for listings that exhaust their extraction retries.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3479,8 +3479,56 @@ with FacebookSource(Path("chrome-profile"), headless=False) as src:
 ```
 
 3. Run it: `python scripts/capture_pages.py`
-4. Add tests to `tests/test_parse.py` that run the same assertions against the `real_*.html` captures — at minimum: `parse_search_results` returns a non-empty list, every result has a non-empty `title` and a `listing_id` of digits, and `parse_item_detail` returns a non-empty `description`.
-5. **If those tests fail, fix `parse.py`, not the captures.** Real payload key names may differ from the synthetic fixtures; that discovery is the entire point of this step.
+4. Add these tests to `tests/test_parse.py`. They skip when the captures are absent, so CI on a fresh clone still passes:
+
+```python
+def real_page(fixtures_dir: Path, name: str) -> str:
+    path = fixtures_dir / "pages" / name
+    if not path.exists():
+        pytest.skip(f"{name} not captured yet — run scripts/capture_pages.py")
+    return path.read_text(encoding="utf-8")
+
+
+def test_real_search_page_parses(fixtures_dir: Path):
+    listings = parse_search_results(real_page(fixtures_dir, "real_search.html"))
+    assert listings, "captured search page produced zero listings"
+    for listing in listings:
+        assert listing.listing_id.isdigit(), listing.listing_id
+        assert listing.title.strip()
+        assert listing.url.endswith(f"/{listing.listing_id}/")
+
+
+def test_real_search_page_yields_some_prices(fixtures_dir: Path):
+    """Not every listing has a price, but a whole page without one means the
+    price key moved."""
+    listings = parse_search_results(real_page(fixtures_dir, "real_search.html"))
+    assert any(l.price_cents is not None for l in listings)
+
+
+def test_real_item_page_parses(fixtures_dir: Path):
+    html = real_page(fixtures_dir, "real_item.html")
+    listing_id = parse_search_results(html)[0].listing_id
+    detail = parse_item_detail(html, listing_id)
+    assert detail.description.strip(), "captured item page produced no description"
+
+
+def test_real_saved_page_parses(fixtures_dir: Path):
+    saved = parse_saved_listings(real_page(fixtures_dir, "real_saved.html"))
+    for listing in saved:
+        assert listing.listing_id.isdigit()
+```
+
+5. Run them: `pytest tests/test_parse.py -v`
+6. **If they fail, fix `parse.py` — never the captures.** Real payload key names may differ from the synthetic fixtures, and discovering that is the entire point of this step. Print the candidate nodes to find the right keys:
+
+```python
+from marketsearch.sources.parse import extract_json_blobs, iter_dicts
+html = open("tests/fixtures/pages/real_search.html", encoding="utf-8").read()
+for blob in extract_json_blobs(html):
+    for node in iter_dicts(blob):
+        if any("listing" in k for k in node):
+            print(sorted(node.keys())[:20])
+```
 
 - [ ] **Step 7: Commit**
 
@@ -3986,10 +4034,59 @@ def download_photos(
 Run: `pytest tests/test_render.py -v`
 Expected: 17 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add the snapshot test**
+
+Content assertions catch missing data; a snapshot catches layout drift — a
+broken table, a lost section heading, stray whitespace in the markup. Append to
+`tests/test_render.py`:
+
+```python
+import os
+import re
+from pathlib import Path
+
+SNAPSHOT = Path(__file__).parent / "fixtures" / "email_snapshot.html"
+_CID = re.compile(r"photo-[0-9a-f]{32}")
+
+
+def test_email_html_matches_the_snapshot():
+    """Guards against layout drift. Regenerate deliberately with:
+        MARKETSEARCH_UPDATE_SNAPSHOTS=1 pytest tests/test_render.py
+    and read the diff before committing it."""
+    change = ChangeCard(listing=listing(), kind="price_change",
+                        old_price_cents=4_100_000, new_price_cents=3_800_000)
+    unverified_card = MatchCard(
+        listing=listing("2"),
+        extraction=extraction(verdict="unverifiable", unknowns=["engine_hours"]),
+        photos=[],
+    )
+    html = render_email([match(photos=[b"img"])], [unverified_card], [change]).html
+    normalised = _CID.sub("photo-CID", html)
+
+    if os.environ.get("MARKETSEARCH_UPDATE_SNAPSHOTS") or not SNAPSHOT.exists():
+        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        SNAPSHOT.write_text(normalised, encoding="utf-8")
+        pytest.skip("snapshot written")
+
+    assert normalised == SNAPSHOT.read_text(encoding="utf-8")
+```
+
+- [ ] **Step 6: Generate the snapshot and confirm it is stable**
+
+Run:
+```bash
+pytest tests/test_render.py::test_email_html_matches_the_snapshot -v   # writes it
+pytest tests/test_render.py -v                                          # now compares
+```
+Expected: first run skips with "snapshot written", second run passes with 18 tests.
+
+Open `tests/fixtures/email_snapshot.html` in a browser and check it actually
+looks right before committing — a snapshot of broken layout is worse than none.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/marketsearch/notify tests/test_render.py
+git add src/marketsearch/notify tests/test_render.py tests/fixtures/email_snapshot.html
 git commit -m "feat: html email rendering with inline photos and sms nudge"
 ```
 
@@ -4834,7 +4931,12 @@ git commit -m "feat: run lock, needs-login flag, and operational alert throttlin
   - `ScanCounters` dataclass: `found`, `new`, `prefiltered`, `extracted`, `matched`, `errors` (all `int`, default 0), plus `.as_dict() -> dict[str, int]`
   - `ScanOutcome` frozen dataclass: `.matches: list[MatchCard]`, `.unverified: list[MatchCard]`, `.counters: ScanCounters`
   - `Scanner(config, store, source, extractor, photo_fetcher=download_photos, dry_run=False)` with `.scan() -> ScanOutcome`
-  - `RELIST_WINDOW_DAYS = 60`
+  - `RELIST_WINDOW_DAYS = 60`, `MAX_EXTRACTION_ATTEMPTS = 3`
+  - On `Store`: `bump_attempts(listing_id: str) -> int`, `attempts(listing_id: str) -> int`, `pending_listings(search_name: str) -> list[RawListing]`
+
+**Retry semantics — subtle and easy to get wrong.** A listing that fails extraction is left `pending`, but it is now *in* the `listings` table, so the next run's dedupe step would exclude it and it would never be retried. `scan()` therefore processes `new listings + pending listings for this search` on every sweep. After `MAX_EXTRACTION_ATTEMPTS` failures the stage becomes `failed`, which `pending_listings` does not return — so a permanently unparseable listing is given up on rather than burning API calls forever.
+
+Valid `stage` values are therefore: `"prefiltered_out"`, `"pending"`, `"extracted"`, `"matched"`, `"failed"`.
   - `content_hash(detail: ListingDetail) -> str`
   - `listing_row_from(listing: RawListing, search_name: str, fp: str, stage: str) -> ListingRow`
 
@@ -5042,6 +5144,36 @@ def test_extraction_failure_leaves_the_listing_pending_for_retry(store: Store):
     outcome = scanner(store, FakeSource([listing("1")]), extractor).scan()
     assert outcome.counters.errors == 1
     assert store.get_listing("1").stage == "pending"
+    assert store.attempts("1") == 1
+
+
+def test_failed_listings_are_retried_by_a_later_run(store: Store):
+    failing = FakeExtractor(error=ExtractionError("api down"))
+    scanner(store, FakeSource([listing("1")]), failing).scan()
+    assert store.get_listing("1").stage == "pending"
+
+    working = FakeExtractor()
+    outcome = scanner(store, FakeSource([listing("1")]), working).scan()
+    assert len(outcome.matches) == 1
+    assert store.get_listing("1").stage == "matched"
+
+
+def test_a_listing_that_exhausts_its_attempts_is_marked_failed(store: Store):
+    failing = FakeExtractor(error=ExtractionError("api down"))
+    for _ in range(3):
+        scanner(store, FakeSource([listing("1")]), failing).scan()
+    assert store.attempts("1") == 3
+    assert store.get_listing("1").stage == "failed"
+
+
+def test_a_failed_listing_is_not_retried_again(store: Store):
+    failing = FakeExtractor(error=ExtractionError("api down"))
+    for _ in range(3):
+        scanner(store, FakeSource([listing("1")]), failing).scan()
+
+    working = FakeExtractor()
+    scanner(store, FakeSource([listing("1")]), working).scan()
+    assert working.calls == 0
 
 
 def test_detail_parse_failure_leaves_the_listing_pending(store: Store):
@@ -5105,7 +5237,54 @@ def test_counters_reflect_the_sweep(store: Store):
 Run: `pytest tests/test_pipeline_scan.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.pipeline'`
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Add the attempt counter to `store.py`**
+
+Add the column to `_SCHEMA`'s `listings` table (after `last_change_check_at`):
+
+```sql
+    extraction_attempts INTEGER NOT NULL DEFAULT 0
+```
+
+Add `extraction_attempts: int` as the final field of the `ListingRow` dataclass, and `extraction_attempts=row["extraction_attempts"]` to `_row_to_listing`. **Every existing `ListingRow(...)` construction in the tests must gain `extraction_attempts=0`** — run `pytest` after this step and fix the `TypeError`s it reports.
+
+Then add these methods to `Store`:
+
+```python
+    def bump_attempts(self, listing_id: str) -> int:
+        self._conn.execute(
+            "UPDATE listings SET extraction_attempts = extraction_attempts + 1"
+            " WHERE listing_id = ?",
+            (listing_id,),
+        )
+        self._conn.commit()
+        return self.attempts(listing_id)
+
+    def attempts(self, listing_id: str) -> int:
+        cur = self._conn.execute(
+            "SELECT extraction_attempts FROM listings WHERE listing_id = ?", (listing_id,)
+        )
+        row = cur.fetchone()
+        return int(row["extraction_attempts"]) if row else 0
+
+    def pending_listings(self, search_name: str) -> list[RawListing]:
+        """Listings awaiting a retry. Excludes 'failed', so a listing that has
+        exhausted its attempts is never picked up again."""
+        cur = self._conn.execute(
+            "SELECT * FROM listings WHERE search_name = ? AND stage = 'pending'",
+            (search_name,),
+        )
+        return [
+            RawListing(
+                listing_id=row["listing_id"], title=row["title"],
+                price_cents=row["price_cents"], location=row["location"],
+                url=row["url"], thumbnail_url=row["thumbnail_url"],
+                seller_name=row["seller_name"],
+            )
+            for row in cur.fetchall()
+        ]
+```
+
+- [ ] **Step 4: Write the implementation**
 
 Create `src/marketsearch/pipeline.py`:
 
@@ -5132,6 +5311,7 @@ from marketsearch.store import ExtractionRow, ListingRow, Store, utcnow
 log = logging.getLogger(__name__)
 
 RELIST_WINDOW_DAYS = 60
+MAX_EXTRACTION_ATTEMPTS = 3
 
 
 @dataclass
@@ -5176,6 +5356,7 @@ def listing_row_from(
         thumbnail_url=listing.thumbnail_url, seller_name=listing.seller_name,
         fingerprint=fp, stage=stage, reject_reason=None, watched=False,
         first_seen_at=now, last_seen_at=now, last_change_check_at=None,
+        extraction_attempts=0,
     )
 
 
@@ -5212,11 +5393,16 @@ class Scanner:
             known = self._store.known_listing_ids([l.listing_id for l in listings])
             fresh = [l for l in listings if l.listing_id not in known]
             counters.new += len(fresh)
+
+            # Listings that failed extraction earlier are already in `listings`,
+            # so dedupe would exclude them forever. Pull them back in explicitly.
+            retries = [] if self._dry_run else self._store.pending_listings(search.name)
             log.info(
-                "%s: %d listings, %d new", search.name, len(listings), len(fresh)
+                "%s: %d listings, %d new, %d awaiting retry",
+                search.name, len(listings), len(fresh), len(retries),
             )
 
-            for listing in fresh:
+            for listing in fresh + retries:
                 budget -= self._process(
                     listing, search, matches, unverified, counters,
                     budget_remaining=budget,
@@ -5227,6 +5413,22 @@ class Scanner:
     def _set_stage(self, listing_id: str, stage: str, reason: str | None = None) -> None:
         if not self._dry_run:
             self._store.set_stage(listing_id, stage, reason)
+
+    def _record_failure(self, listing_id: str, counters: ScanCounters, why: str) -> None:
+        """Leave a listing retryable, unless it has used up its attempts."""
+        counters.errors += 1
+        if self._dry_run:
+            return
+        attempts = self._store.bump_attempts(listing_id)
+        if attempts >= MAX_EXTRACTION_ATTEMPTS:
+            log.warning(
+                "giving up on %s after %d attempts (%s)", listing_id, attempts, why
+            )
+            self._store.set_stage(
+                listing_id, "failed", f"{why} after {attempts} attempts"
+            )
+        else:
+            self._store.set_stage(listing_id, "pending")
 
     def _process(
         self,
@@ -5270,8 +5472,7 @@ class Scanner:
             detail = self._source.fetch_detail(listing.listing_id)
         except (ParseError, SourceError) as exc:
             log.warning("detail fetch failed for %s: %s", listing.listing_id, exc)
-            counters.errors += 1
-            self._set_stage(listing.listing_id, "pending")
+            self._record_failure(listing.listing_id, counters, "detail fetch failed")
             return 0
 
         if not self._dry_run:
@@ -5281,8 +5482,7 @@ class Scanner:
             result = self._extractor.extract(listing, detail, search.criteria)
         except ExtractionError as exc:
             log.warning("extraction failed for %s: %s", listing.listing_id, exc)
-            counters.errors += 1
-            self._set_stage(listing.listing_id, "pending")
+            self._record_failure(listing.listing_id, counters, "extraction failed")
             return 0
 
         counters.extracted += 1
@@ -5333,16 +5533,16 @@ class Scanner:
         return 1
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest tests/test_pipeline_scan.py -v`
-Expected: 17 passed
+Run: `pytest tests/test_pipeline_scan.py tests/test_store.py tests/test_store_repos.py -v`
+Expected: 20 pipeline tests plus the existing store tests, all passing.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/marketsearch/pipeline.py tests/test_pipeline_scan.py
-git commit -m "feat: scan pipeline with dedupe, prefilter, extraction budget"
+git add src/marketsearch/pipeline.py src/marketsearch/store.py tests/test_pipeline_scan.py
+git commit -m "feat: scan pipeline with dedupe, prefilter, budget and retry cap"
 ```
 
 ---
@@ -5745,3 +5945,1449 @@ git add src/marketsearch/pipeline.py src/marketsearch/sources tests/test_pipelin
         tests/test_parse.py tests/fixtures/pages/unavailable.html
 git commit -m "feat: watched listing sync from facebook saved items with change detection"
 ```
+
+---
+
+## Task 17: Run orchestrator
+
+**Files:**
+- Modify: `src/marketsearch/pipeline.py` (add `run_once`, `RunReport`)
+- Test: `tests/test_run_once.py`
+
+**Interfaces:**
+- Consumes: `Scanner`, `WatchSyncer` (Tasks 15–16), `Dispatcher` (Task 13), `OperationalAlerts`, `needs_login`, `set_needs_login`, `clear_needs_login` (Task 14)
+- Produces:
+  - `RunReport` frozen dataclass: `.counters: ScanCounters`, `.changes: int`, `.watch_errors: int`, `.notified: bool`, `.blocked: str | None`
+  - `run_once(config, store, source, extractor, dispatcher, alerts, notify_operational, dry_run=False) -> RunReport`
+
+`notify_operational: Callable[[str, str], None]` takes `(subject, body)`. Task 18 wires it to the email sender; tests pass a recorder.
+
+**The rules this function enforces.** A blocked account stops the run before Facebook is touched again — retrying into a checkpoint is how a soft flag becomes a hard one. Operational problems alert once per 24 hours with one "back to normal" when they clear. And a run always closes its `runs` row, whatever happened.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_run_once.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.pipeline import run_once
+from marketsearch.runstate import OperationalAlerts, needs_login, set_needs_login
+from marketsearch.sources.base import LoginRequired, ParseError
+from marketsearch.store import Store
+
+from tests.test_pipeline_scan import FakeExtractor, config, listing
+from tests.test_pipeline_watched import FakeWatchSource
+
+
+class FakeSource(FakeWatchSource):
+    """A source that also returns search results."""
+
+    def __init__(self, results=None, search_error=None, **kwargs):
+        super().__init__(**kwargs)
+        self.results = results or []
+        self.search_error = search_error
+
+    def search(self, query, location, radius_miles):
+        if self.search_error is not None:
+            raise self.search_error
+        return list(self.results)
+
+
+class RecordingDispatcher:
+    def __init__(self, result=True):
+        self.calls: list[tuple] = []
+        self._result = result
+
+    def dispatch(self, matches, unverified, changes):
+        self.calls.append((matches, unverified, changes))
+        return self._result
+
+
+class RecordingOperational:
+    def __init__(self):
+        self.sent: list[tuple[str, str]] = []
+
+    def __call__(self, subject: str, body: str) -> None:
+        self.sent.append((subject, body))
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "run.db")
+    s.initialize()
+    yield s
+    s.close()
+
+
+def execute(store, source, dispatcher=None, operational=None, **kwargs):
+    return run_once(
+        config=config(), store=store, source=source, extractor=FakeExtractor(),
+        dispatcher=dispatcher or RecordingDispatcher(),
+        alerts=OperationalAlerts(store),
+        notify_operational=operational or RecordingOperational(),
+        **kwargs,
+    )
+
+
+def test_a_normal_run_scans_syncs_and_dispatches(store: Store):
+    dispatcher = RecordingDispatcher()
+    report = execute(store, FakeSource(results=[listing("1")]), dispatcher)
+    assert report.blocked is None
+    assert report.counters.matched == 1
+    assert report.notified is True
+    assert len(dispatcher.calls) == 1
+
+
+def test_run_row_is_written_and_closed(store: Store):
+    execute(store, FakeSource(results=[listing("1")]))
+    row = store._conn.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
+    assert row["ended_at"] is not None
+    assert row["matched"] == 1
+
+
+def test_login_required_sets_the_flag_and_blocks(store: Store):
+    source = FakeSource(search_error=LoginRequired("checkpoint"))
+    report = execute(store, source)
+    assert report.blocked == "checkpoint"
+    assert needs_login(store) == "checkpoint"
+
+
+def test_login_required_sends_one_operational_alert(store: Store):
+    operational = RecordingOperational()
+    execute(store, FakeSource(search_error=LoginRequired("checkpoint")), operational=operational)
+    assert len(operational.sent) == 1
+    assert "log in" in operational.sent[0][0].lower()
+
+
+def test_a_blocked_account_stops_the_next_run_before_touching_facebook(store: Store):
+    set_needs_login(store, "checkpoint")
+    source = FakeSource(results=[listing("1")])
+    report = execute(store, source)
+    assert report.blocked == "checkpoint"
+    assert source.detail_calls == []
+
+
+def test_repeated_login_alerts_are_throttled(store: Store):
+    operational = RecordingOperational()
+    for _ in range(3):
+        execute(store, FakeSource(search_error=LoginRequired("checkpoint")),
+                operational=operational)
+    assert len(operational.sent) == 1
+
+
+def test_clearing_the_block_sends_one_all_clear(store: Store):
+    operational = RecordingOperational()
+    execute(store, FakeSource(search_error=LoginRequired("checkpoint")), operational=operational)
+    store.set_state("needs_login", "")  # user ran `marketsearch login`
+    execute(store, FakeSource(results=[listing("1")]), operational=operational)
+    assert len(operational.sent) == 2
+    assert "back to normal" in operational.sent[1][0].lower()
+
+
+def test_parse_failure_alerts_once_and_does_not_block(store: Store):
+    operational = RecordingOperational()
+    source = FakeSource(search_error=ParseError("markup changed"))
+    report = execute(store, source, operational=operational)
+    assert report.blocked is None
+    assert len(operational.sent) == 1
+    assert "parse" in operational.sent[0][0].lower()
+
+
+def test_repeated_parse_failures_are_throttled(store: Store):
+    operational = RecordingOperational()
+    for _ in range(3):
+        execute(store, FakeSource(search_error=ParseError("markup changed")),
+                operational=operational)
+    assert len(operational.sent) == 1
+
+
+def test_dry_run_does_not_dispatch(store: Store):
+    dispatcher = RecordingDispatcher()
+    report = execute(store, FakeSource(results=[listing("1")]), dispatcher, dry_run=True)
+    assert dispatcher.calls == []
+    assert report.notified is False
+    assert report.counters.matched == 1
+
+
+def test_watched_changes_reach_the_dispatcher(store: Store):
+    from marketsearch.models import ListingDetail
+    from marketsearch.pipeline import content_hash
+
+    store.upsert_listing(listing("1", price_cents=4_100_000), "bobcat-t770", "fp")
+    detail = ListingDetail(listing_id="1", description="2400 hours",
+                           structured_fields={}, photo_urls=[], distance_miles=None)
+    store.save_detail(detail, content_hash(detail))
+
+    dispatcher = RecordingDispatcher()
+    execute(store, FakeSource(saved=[listing("1", price_cents=3_800_000)]), dispatcher)
+    _matches, _unverified, changes = dispatcher.calls[0]
+    assert len(changes) == 1
+    assert changes[0].kind == "price_change"
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_run_once.py -v`
+Expected: FAIL with `ImportError: cannot import name 'run_once'`
+
+- [ ] **Step 3: Add `run_once` to `pipeline.py`**
+
+Append to `src/marketsearch/pipeline.py`:
+
+```python
+from typing import Protocol
+
+from marketsearch.runstate import (
+    OperationalAlerts,
+    clear_needs_login,
+    needs_login,
+    set_needs_login,
+)
+from marketsearch.sources.base import LoginRequired
+
+
+@dataclass(frozen=True)
+class RunReport:
+    counters: ScanCounters = field(default_factory=ScanCounters)
+    changes: int = 0
+    watch_errors: int = 0
+    notified: bool = False
+    blocked: str | None = None
+
+
+class _Dispatcher(Protocol):
+    def dispatch(self, matches, unverified, changes) -> bool: ...
+
+
+def run_once(
+    config: Config,
+    store: Store,
+    source: ListingSource,
+    extractor: Extractor,
+    dispatcher: _Dispatcher,
+    alerts: OperationalAlerts,
+    notify_operational: Callable[[str, str], None],
+    dry_run: bool = False,
+) -> RunReport:
+    """One complete sweep: scan, sync watched listings, alert.
+
+    Never touches Facebook while the account is flagged as needing attention —
+    retrying into a checkpoint is how a soft flag becomes a hard one.
+    """
+    blocked = needs_login(store)
+    if blocked is not None:
+        log.warning("account needs attention (%s); skipping run", blocked)
+        return RunReport(blocked=blocked)
+
+    run_id = None if dry_run else store.start_run()
+
+    try:
+        scan = Scanner(config, store, source, extractor, dry_run=dry_run).scan()
+        watch = WatchSyncer(config, store, source, extractor, dry_run=dry_run).sync()
+    except LoginRequired as exc:
+        if not dry_run:
+            set_needs_login(store, exc.kind)
+        if alerts.should_send("needs_login"):
+            notify_operational(
+                "MarketSearch needs you to log in again",
+                f"Facebook presented a {exc.kind}. Runs are paused until you run "
+                f"`marketsearch login` on the MarketSearch machine and complete it "
+                f"by hand.\n\nNo further scraping will be attempted until then.",
+            )
+            alerts.mark_sent("needs_login")
+        if run_id is not None:
+            store.finish_run(run_id, {"errors": 1})
+        return RunReport(blocked=exc.kind)
+    except ParseError as exc:
+        if alerts.should_send("parse_failure"):
+            notify_operational(
+                "MarketSearch could not parse a Facebook page",
+                f"{exc}\n\nThe offending page was saved to the debug folder. "
+                f"Runs continue, but results may be incomplete until the parser "
+                f"is updated.",
+            )
+            alerts.mark_sent("parse_failure")
+        if run_id is not None:
+            store.finish_run(run_id, {"errors": 1})
+        return RunReport(counters=ScanCounters(errors=1))
+
+    if alerts.clear("parse_failure"):
+        notify_operational(
+            "MarketSearch is back to normal",
+            "Page parsing succeeded again. No action needed.",
+        )
+    if clear_needs_login(store) or alerts.clear("needs_login"):
+        notify_operational(
+            "MarketSearch is back to normal",
+            "The Facebook session is working again. No action needed.",
+        )
+
+    notified = False
+    if not dry_run:
+        notified = dispatcher.dispatch(scan.matches, scan.unverified, watch.changes)
+
+    counters = scan.counters
+    counters.errors += watch.errors
+    if run_id is not None:
+        store.finish_run(run_id, counters.as_dict())
+
+    log.info(
+        "run complete: %d found, %d new, %d matched, %d change(s), %d error(s)",
+        counters.found, counters.new, counters.matched, len(watch.changes), counters.errors,
+    )
+    return RunReport(
+        counters=counters, changes=len(watch.changes),
+        watch_errors=watch.errors, notified=notified,
+    )
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_run_once.py -v`
+Expected: 11 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/marketsearch/pipeline.py tests/test_run_once.py
+git commit -m "feat: run orchestrator with block handling and alert throttling"
+```
+
+---
+
+## Task 18: CLI — run, login, test-search, history
+
+**Files:**
+- Create: `src/marketsearch/cli.py`
+- Test: `tests/test_cli.py`
+
+**Interfaces:**
+- Consumes: everything above
+- Produces:
+  - `app: typer.Typer` — the console entry point declared in `pyproject.toml`
+  - `build_extractor(config) -> Extractor`
+  - `build_dispatcher(config, store) -> Dispatcher`
+  - `build_operational_notifier(config) -> Callable[[str, str], None]`
+  - Commands: `run`, `login`, `test-search`, `history`
+
+Default paths, all overridable with `--config` / `--db`: config `./config.yaml`, database `./marketsearch.db`, log `./logs/marketsearch.log`, lock `./marketsearch.lock`, debug pages `./debug/`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_cli.py`:
+
+```python
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from marketsearch.cli import app
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    shutil.copy("config.example.yaml", tmp_path / "config.yaml")
+    return tmp_path
+
+
+def test_help_lists_every_command():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    for command in ("run", "login", "test-search", "history"):
+        assert command in result.stdout
+
+
+def test_run_reports_a_missing_config_clearly(tmp_path: Path):
+    result = runner.invoke(app, ["run", "--config", str(tmp_path / "nope.yaml")])
+    assert result.exit_code != 0
+    assert "not found" in result.stdout
+
+
+def test_run_refuses_a_second_concurrent_run(project: Path, monkeypatch):
+    lock = project / "marketsearch.lock"
+    lock.write_text("1234", encoding="utf-8")
+    result = runner.invoke(app, [
+        "run", "--config", str(project / "config.yaml"),
+        "--db", str(project / "m.db"), "--lock", str(lock),
+    ])
+    assert result.exit_code != 0
+    assert "already running" in result.stdout.lower()
+
+
+def test_history_on_an_empty_database_says_so(project: Path):
+    result = runner.invoke(app, [
+        "history", "--db", str(project / "m.db"),
+    ])
+    assert result.exit_code == 0
+    assert "no runs" in result.stdout.lower()
+
+
+def test_history_lists_completed_runs(project: Path):
+    from marketsearch.store import Store
+
+    db = project / "m.db"
+    with Store(db) as store:
+        store.initialize()
+        run_id = store.start_run()
+        store.finish_run(run_id, {"found": 12, "new": 3, "matched": 1, "errors": 0})
+
+    result = runner.invoke(app, ["history", "--db", str(db)])
+    assert result.exit_code == 0
+    assert "12" in result.stdout
+    assert "1" in result.stdout
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_cli.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.cli'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/marketsearch/cli.py`:
+
+```python
+"""Command-line entry points."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Callable
+
+import typer
+from dotenv import load_dotenv
+
+from marketsearch.config import Config, ConfigError, load_config
+from marketsearch.extract import Extractor
+from marketsearch.logging_setup import setup_logging
+from marketsearch.notify.delivery import (
+    Dispatcher,
+    EmailSender,
+    SmsSender,
+    resolve_secret,
+)
+from marketsearch.notify.render import RenderedEmail
+from marketsearch.pipeline import run_once
+from marketsearch.runstate import AlreadyRunning, OperationalAlerts, RunLock
+from marketsearch.sources.facebook import FacebookSource, open_login_browser
+from marketsearch.store import Store
+
+log = logging.getLogger(__name__)
+
+app = typer.Typer(add_completion=False, help="Watch Facebook Marketplace for equipment.")
+
+DEFAULT_CONFIG = Path("config.yaml")
+DEFAULT_DB = Path("marketsearch.db")
+DEFAULT_LOG = Path("logs/marketsearch.log")
+DEFAULT_LOCK = Path("marketsearch.lock")
+DEFAULT_DEBUG = Path("debug")
+
+
+def _load(config_path: Path) -> Config:
+    try:
+        return load_config(config_path)
+    except ConfigError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=2) from exc
+
+
+def build_extractor(config: Config) -> Extractor:
+    import anthropic
+
+    return Extractor(
+        anthropic.Anthropic(),
+        model=config.extraction.model,
+        effort=config.extraction.effort,
+    )
+
+
+def build_dispatcher(config: Config, store: Store) -> Dispatcher:
+    email = EmailSender(
+        config.notifications.email,
+        resolve_secret(config.notifications.email.password_env),
+    )
+    sms = SmsSender(
+        config.notifications.sms,
+        resolve_secret(config.notifications.sms.account_sid_env),
+        resolve_secret(config.notifications.sms.auth_token_env),
+    )
+    return Dispatcher(store, email, sms, enabled=config.notifications.enabled)
+
+
+def build_operational_notifier(config: Config) -> Callable[[str, str], None]:
+    """Operational alerts go out even when listing notifications are disabled —
+    a silent tool that has stopped working is worse than one that is noisy."""
+
+    def notify(subject: str, body: str) -> None:
+        try:
+            sender = EmailSender(
+                config.notifications.email,
+                resolve_secret(config.notifications.email.password_env),
+            )
+            html = f"<html><body><p>{body.replace(chr(10), '<br>')}</p></body></html>"
+            sender.send(RenderedEmail(subject=subject, html=html, images=[]))
+        except Exception as exc:
+            log.error("could not send operational alert %r: %s", subject, exc)
+
+    return notify
+
+
+@app.command()
+def run(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    lock: Path = typer.Option(DEFAULT_LOCK, "--lock"),
+    log_file: Path = typer.Option(DEFAULT_LOG, "--log"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Scan but write and send nothing."),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Perform one sweep."""
+    load_dotenv()
+    setup_logging(log_file, verbose)
+    cfg = _load(config)
+
+    try:
+        with RunLock(lock):
+            with Store(db) as store:
+                store.initialize()
+                with FacebookSource(
+                    cfg.account.profile_dir, headless=True, debug_dir=DEFAULT_DEBUG
+                ) as source:
+                    report = run_once(
+                        config=cfg,
+                        store=store,
+                        source=source,
+                        extractor=build_extractor(cfg),
+                        dispatcher=build_dispatcher(cfg, store),
+                        alerts=OperationalAlerts(store),
+                        notify_operational=build_operational_notifier(cfg),
+                        dry_run=dry_run,
+                    )
+    except AlreadyRunning as exc:
+        typer.echo(f"Already running: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if report.blocked:
+        typer.echo(
+            f"Paused: Facebook needs attention ({report.blocked}). "
+            f"Run `marketsearch login`."
+        )
+        raise typer.Exit(code=3)
+
+    typer.echo(
+        f"{report.counters.found} found, {report.counters.new} new, "
+        f"{report.counters.matched} matched, {report.changes} change(s), "
+        f"{report.counters.errors} error(s)"
+        + ("  [dry run — nothing written or sent]" if dry_run else "")
+    )
+
+
+@app.command()
+def login(config: Path = typer.Option(DEFAULT_CONFIG, "--config")) -> None:
+    """Open a browser to log into Facebook and set your Marketplace location."""
+    cfg = _load(config)
+    open_login_browser(cfg.account.profile_dir)
+
+    with Store(DEFAULT_DB) as store:
+        store.initialize()
+        store.set_state("needs_login", "")
+    typer.echo("Session saved. Runs will resume on the next scheduled sweep.")
+
+
+@app.command(name="test-search")
+def test_search(
+    query: str,
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Do one live search and print what was parsed. The smoke test after any
+    Facebook breakage."""
+    load_dotenv()
+    setup_logging(DEFAULT_LOG, verbose)
+    cfg = _load(config)
+
+    with FacebookSource(
+        cfg.account.profile_dir, headless=False, debug_dir=DEFAULT_DEBUG
+    ) as source:
+        listings = source.search(
+            query, cfg.location.anchor, cfg.location.radius_miles
+        )
+
+    typer.echo(f"{len(listings)} listing(s) parsed\n")
+    for listing in listings:
+        price = "—" if listing.price_cents is None else f"${listing.price_cents / 100:,.0f}"
+        typer.echo(f"  {listing.listing_id}  {price:>10}  {listing.title}")
+
+
+@app.command()
+def history(
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    limit: int = typer.Option(20, "--limit"),
+) -> None:
+    """Show recent runs."""
+    with Store(db) as store:
+        store.initialize()
+        rows = store._conn.execute(
+            "SELECT * FROM runs ORDER BY run_id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    if not rows:
+        typer.echo("No runs recorded yet.")
+        return
+
+    typer.echo(f"{'started':<22}{'found':>7}{'new':>6}{'matched':>9}{'errors':>8}")
+    for row in rows:
+        typer.echo(
+            f"{row['started_at'][:19]:<22}{row['found']:>7}{row['new']:>6}"
+            f"{row['matched']:>9}{row['errors']:>8}"
+        )
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_cli.py -v`
+Expected: 5 passed
+
+- [ ] **Step 5: Verify the entry point is installed**
+
+Run: `marketsearch --help`
+Expected: the command list is printed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/marketsearch/cli.py tests/test_cli.py
+git commit -m "feat: cli with run, login, test-search and history commands"
+```
+
+---
+
+## Task 19: Shakedown tooling — preview and replay
+
+**Files:**
+- Create: `src/marketsearch/shakedown.py`
+- Modify: `src/marketsearch/store.py` (three query methods), `src/marketsearch/cli.py` (two commands)
+- Test: `tests/test_shakedown.py`
+
+**Interfaces:**
+- Consumes: `Store`, `MatchCard`, `render_email`, `Extractor`
+- Produces:
+  - On `Store`: `latest_run_id() -> int | None`, `extractions_between(start: str, end: str) -> list[tuple[ListingRow, ExtractionRow]]`, `listings_with_details(search_name: str | None, since: str) -> list[tuple[ListingRow, ListingDetail, ExtractionRow | None]]`
+  - `parse_since(value: str) -> datetime` — accepts `7d`, `36h`, `30m`
+  - `collect_run_cards(store, config, run_id) -> tuple[list[MatchCard], list[MatchCard]]`
+  - `ReplayRow` frozen dataclass: `.listing_id`, `.title`, `.old_verdict: str | None`, `.new_verdict: str`, `.reasoning: str`
+  - `replay(store, config, extractor, search_name, since, save=False) -> list[ReplayRow]`
+  - `format_replay(rows: list[ReplayRow], search_name: str) -> str`
+  - CLI commands `preview` and `replay`
+
+**Why this exists.** `preview` shows the real email the tool would have sent, produced by the same rendering code path — not a terminal summary that approximates it. `replay` re-judges stored listings against edited criteria without touching Facebook, so tuning carries zero detection risk and happens against real listings rather than hypotheticals.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_shakedown.py`:
+
+```python
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from marketsearch.models import ListingDetail
+from marketsearch.pipeline import content_hash
+from marketsearch.shakedown import (
+    ReplayRow,
+    collect_run_cards,
+    format_replay,
+    parse_since,
+    replay,
+)
+from marketsearch.store import Store
+
+from tests.test_pipeline_scan import FakeExtractor, config, extraction, listing
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "s.db")
+    s.initialize()
+    yield s
+    s.close()
+
+
+def seed_extracted(store: Store, listing_id: str, verdict: str = "match") -> None:
+    store.upsert_listing(listing(listing_id), "bobcat-t770", f"fp{listing_id}")
+    detail = ListingDetail(listing_id=listing_id, description="2400 hours",
+                           structured_fields={}, photo_urls=[], distance_miles=None)
+    store.save_detail(detail, content_hash(detail))
+    store.save_extraction(
+        listing_id=listing_id, attributes={"core": {"engine_hours": 2400}},
+        verdict=verdict, confidence=0.9, reasoning="reasons", unknowns=[],
+        model="claude-opus-5", input_tokens=1, output_tokens=1, cost_cents=0.1,
+    )
+    store.set_stage(listing_id, "matched" if verdict == "match" else "extracted")
+
+
+def test_parse_since_days():
+    delta = datetime.now(timezone.utc) - parse_since("7d")
+    assert timedelta(days=6, hours=23) < delta < timedelta(days=7, hours=1)
+
+
+def test_parse_since_hours_and_minutes():
+    assert (datetime.now(timezone.utc) - parse_since("36h")) > timedelta(hours=35)
+    assert (datetime.now(timezone.utc) - parse_since("30m")) > timedelta(minutes=29)
+
+
+def test_parse_since_rejects_nonsense():
+    with pytest.raises(ValueError, match="7 days"):
+        parse_since("last tuesday")
+
+
+def test_latest_run_id_is_none_on_an_empty_database(store: Store):
+    assert store.latest_run_id() is None
+
+
+def test_latest_run_id_returns_the_newest(store: Store):
+    store.start_run()
+    second = store.start_run()
+    assert store.latest_run_id() == second
+
+
+def test_collect_run_cards_splits_matches_and_unverified(store: Store):
+    run_id = store.start_run()
+    seed_extracted(store, "1", "match")
+    seed_extracted(store, "2", "unverifiable")
+    seed_extracted(store, "3", "no_match")
+    store.finish_run(run_id, {})
+
+    matches, unverified = collect_run_cards(store, config(), run_id)
+    assert [c.listing.listing_id for c in matches] == ["1"]
+    assert [c.listing.listing_id for c in unverified] == ["2"]
+
+
+def test_collect_run_cards_respects_on_unknown_skip(store: Store):
+    from tests.test_pipeline_scan import CONFIG_DICT
+
+    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    run_id = store.start_run()
+    seed_extracted(store, "2", "unverifiable")
+    store.finish_run(run_id, {})
+
+    _matches, unverified = collect_run_cards(store, cfg, run_id)
+    assert unverified == []
+
+
+def test_collect_run_cards_ignores_other_runs(store: Store):
+    first = store.start_run()
+    seed_extracted(store, "1", "match")
+    store.finish_run(first, {})
+
+    second = store.start_run()
+    store.finish_run(second, {})
+
+    matches, _unverified = collect_run_cards(store, config(), second)
+    assert matches == []
+
+
+def test_replay_reextracts_stored_listings(store: Store):
+    seed_extracted(store, "1", "unverifiable")
+    extractor = FakeExtractor(extraction("match"))
+    rows = replay(store, config(), extractor, search_name="bobcat-t770", since="30d")
+    assert len(rows) == 1
+    assert rows[0].old_verdict == "unverifiable"
+    assert rows[0].new_verdict == "match"
+
+
+def test_replay_never_touches_the_network_or_facebook(store: Store):
+    """The whole point: tuning carries zero detection risk."""
+    seed_extracted(store, "1")
+    extractor = FakeExtractor()
+    replay(store, config(), extractor, search_name="bobcat-t770", since="30d")
+    assert extractor.calls == 1  # one Claude call, no source involved
+
+
+def test_replay_does_not_write_by_default(store: Store):
+    seed_extracted(store, "1", "unverifiable")
+    replay(store, config(), FakeExtractor(extraction("match")),
+           search_name="bobcat-t770", since="30d")
+    assert store.latest_extraction("1").verdict == "unverifiable"
+
+
+def test_replay_writes_when_save_is_requested(store: Store):
+    seed_extracted(store, "1", "unverifiable")
+    replay(store, config(), FakeExtractor(extraction("match")),
+           search_name="bobcat-t770", since="30d", save=True)
+    assert store.latest_extraction("1").verdict == "match"
+
+
+def test_replay_filters_by_search_name(store: Store):
+    seed_extracted(store, "1")
+    store.upsert_listing(listing("2"), "some-other-search", "fp2")
+    rows = replay(store, config(), FakeExtractor(), search_name="bobcat-t770", since="30d")
+    assert [r.listing_id for r in rows] == ["1"]
+
+
+def test_replay_skips_listings_with_no_stored_detail(store: Store):
+    store.upsert_listing(listing("3"), "bobcat-t770", "fp3")  # no detail saved
+    rows = replay(store, config(), FakeExtractor(), search_name="bobcat-t770", since="30d")
+    assert rows == []
+
+
+def test_format_replay_shows_counts_and_changes():
+    rows = [
+        ReplayRow("1", "2019 T770", "unverifiable", "match", "2-speed now confirmed"),
+        ReplayRow("2", "2016 T770", "match", "match", "unchanged"),
+    ]
+    text = format_replay(rows, "bobcat-t770")
+    assert "bobcat-t770" in text
+    assert "2 listings replayed" in text
+    assert "CHANGED" in text
+    assert "unverifiable → match" in text
+    assert "2016 T770" not in text.split("CHANGED")[1]
+
+
+def test_format_replay_says_so_when_nothing_moved():
+    rows = [ReplayRow("1", "2019 T770", "match", "match", "unchanged")]
+    assert "no verdicts changed" in format_replay(rows, "bobcat-t770").lower()
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_shakedown.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.shakedown'`
+
+- [ ] **Step 3: Add the three query methods to `store.py`**
+
+```python
+    def latest_run_id(self) -> int | None:
+        cur = self._conn.execute("SELECT run_id FROM runs ORDER BY run_id DESC LIMIT 1")
+        row = cur.fetchone()
+        return int(row["run_id"]) if row else None
+
+    def extractions_between(
+        self, start: str, end: str
+    ) -> list[tuple[ListingRow, ExtractionRow]]:
+        """Every extraction produced inside a run's window, newest first."""
+        cur = self._conn.execute(
+            """
+            SELECT e.id AS extraction_id, l.listing_id AS lid
+            FROM extractions e JOIN listings l ON l.listing_id = e.listing_id
+            WHERE e.created_at >= ? AND e.created_at <= ?
+            ORDER BY e.id DESC
+            """,
+            (start, end),
+        )
+        out: list[tuple[ListingRow, ExtractionRow]] = []
+        seen: set[str] = set()
+        for row in cur.fetchall():
+            listing_id = row["lid"]
+            if listing_id in seen:
+                continue
+            seen.add(listing_id)
+            listing = self.get_listing(listing_id)
+            extraction = self.latest_extraction(listing_id)
+            if listing is not None and extraction is not None:
+                out.append((listing, extraction))
+        return out
+
+    def listings_with_details(
+        self, search_name: str | None, since: str
+    ) -> list[tuple[ListingRow, ListingDetail, ExtractionRow | None]]:
+        """Stored listings that have a saved detail — the replay corpus."""
+        sql = (
+            "SELECT l.listing_id AS lid FROM listings l"
+            " JOIN listing_details d ON d.listing_id = l.listing_id"
+            " WHERE l.first_seen_at >= ?"
+        )
+        params: list[object] = [since]
+        if search_name is not None:
+            sql += " AND l.search_name = ?"
+            params.append(search_name)
+        sql += " ORDER BY l.first_seen_at DESC"
+
+        out = []
+        for row in self._conn.execute(sql, params).fetchall():
+            listing = self.get_listing(row["lid"])
+            detail = self.get_detail(row["lid"])
+            if listing is not None and detail is not None:
+                out.append((listing, detail, self.latest_extraction(row["lid"])))
+        return out
+```
+
+- [ ] **Step 4: Write `shakedown.py`**
+
+Create `src/marketsearch/shakedown.py`:
+
+```python
+"""Preview and replay — the tools that earn the tool its place in your inbox.
+
+Nothing here touches Facebook. `preview` re-renders what a past run would have
+sent; `replay` re-judges stored listings against edited criteria. Both work
+entirely from the database, so tuning carries no detection risk.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from marketsearch.config import Config, SearchConfig
+from marketsearch.extract import ExtractionError, Extractor
+from marketsearch.models import RawListing
+from marketsearch.notify.render import MatchCard
+from marketsearch.store import ExtractionRow, ListingRow, Store
+
+log = logging.getLogger(__name__)
+
+_SINCE = re.compile(r"^(\d+)([dhm])$")
+_UNITS = {"d": "days", "h": "hours", "m": "minutes"}
+
+
+def parse_since(value: str) -> datetime:
+    """Turn '7d' / '36h' / '30m' into a UTC cutoff."""
+    match = _SINCE.match(value.strip().lower())
+    if match is None:
+        raise ValueError(
+            f"could not understand {value!r} — use a form like 7d (7 days), "
+            f"36h, or 30m"
+        )
+    amount, unit = int(match.group(1)), match.group(2)
+    return datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
+
+
+def _search_by_name(config: Config, name: str) -> SearchConfig | None:
+    for search in config.searches:
+        if search.name == name:
+            return search
+    return None
+
+
+def collect_run_cards(
+    store: Store, config: Config, run_id: int
+) -> tuple[list[MatchCard], list[MatchCard]]:
+    """Rebuild the cards a run produced, from what it wrote to the database."""
+    row = store._conn.execute(
+        "SELECT started_at, ended_at FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if row is None:
+        return [], []
+
+    end = row["ended_at"] or datetime.now(timezone.utc).isoformat()
+    matches: list[MatchCard] = []
+    unverified: list[MatchCard] = []
+
+    for listing, extraction in store.extractions_between(row["started_at"], end):
+        card = MatchCard(listing=listing, extraction=extraction, photos=[])
+        if extraction.verdict == "match":
+            matches.append(card)
+        elif extraction.verdict == "unverifiable":
+            search = _search_by_name(config, listing.search_name)
+            if search is None or search.on_unknown == "alert":
+                unverified.append(card)
+
+    return matches, unverified
+
+
+@dataclass(frozen=True)
+class ReplayRow:
+    listing_id: str
+    title: str
+    old_verdict: str | None
+    new_verdict: str
+    reasoning: str
+
+
+def _as_raw(listing: ListingRow) -> RawListing:
+    return RawListing(
+        listing_id=listing.listing_id, title=listing.title,
+        price_cents=listing.price_cents, location=listing.location,
+        url=listing.url, thumbnail_url=listing.thumbnail_url,
+        seller_name=listing.seller_name,
+    )
+
+
+def replay(
+    store: Store,
+    config: Config,
+    extractor: Extractor,
+    search_name: str | None,
+    since: str,
+    save: bool = False,
+) -> list[ReplayRow]:
+    """Re-judge stored listings with the criteria currently in config.yaml."""
+    cutoff = parse_since(since).isoformat()
+    corpus = store.listings_with_details(search_name, cutoff)
+    rows: list[ReplayRow] = []
+
+    for listing, detail, previous in corpus:
+        search = _search_by_name(config, listing.search_name)
+        if search is None:
+            log.warning(
+                "listing %s belongs to search %r which is no longer in config; skipping",
+                listing.listing_id, listing.search_name,
+            )
+            continue
+
+        try:
+            result = extractor.extract(_as_raw(listing), detail, search.criteria)
+        except ExtractionError as exc:
+            log.warning("replay failed for %s: %s", listing.listing_id, exc)
+            continue
+
+        extraction = result.extraction
+        rows.append(
+            ReplayRow(
+                listing_id=listing.listing_id,
+                title=listing.title,
+                old_verdict=previous.verdict if previous else None,
+                new_verdict=extraction.verdict,
+                reasoning=extraction.reasoning,
+            )
+        )
+
+        if save:
+            store.save_extraction(
+                listing_id=listing.listing_id,
+                attributes=extraction.model_dump(
+                    include={"core", "specs", "condition", "deal"}
+                ),
+                verdict=extraction.verdict, confidence=extraction.confidence,
+                reasoning=extraction.reasoning, unknowns=extraction.unknowns,
+                model=config.extraction.model,
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                cost_cents=result.cost_cents,
+            )
+
+    return rows
+
+
+def format_replay(rows: list[ReplayRow], search_name: str) -> str:
+    if not rows:
+        return f"{search_name} — nothing to replay in that window."
+
+    def count(verdict: str, key) -> int:
+        return sum(1 for r in rows if key(r) == verdict)
+
+    lines = [f"{search_name} — {len(rows)} listings replayed", ""]
+    for verdict in ("match", "unverifiable", "no_match"):
+        new = count(verdict, lambda r: r.new_verdict)
+        old = count(verdict, lambda r: r.old_verdict)
+        delta = new - old
+        arrow = f"{delta:+d}" if delta else "  "
+        lines.append(f"  → {verdict:<14}{new:>3}  (was {old})  {arrow}")
+
+    changed = [r for r in rows if r.old_verdict != r.new_verdict]
+    if not changed:
+        lines += ["", "  No verdicts changed."]
+        return "\n".join(lines)
+
+    lines += ["", "  CHANGED:"]
+    for row in changed:
+        old = row.old_verdict or "none"
+        lines.append(
+            f"  {row.listing_id:<12} {row.title[:38]:<40} "
+            f"{old} → {row.new_verdict}"
+        )
+        lines.append(f"  {'':<12} {row.reasoning[:76]}")
+    return "\n".join(lines)
+```
+
+- [ ] **Step 5: Add the two CLI commands**
+
+Append to `src/marketsearch/cli.py`:
+
+```python
+def _with_photos(card: MatchCard, store: Store) -> MatchCard:
+    """Re-attach photos to a reconstructed card by re-downloading them.
+
+    Facebook's image URLs may have expired since the run, so this is
+    best-effort by design — a card whose photos fail still renders.
+    """
+    from dataclasses import replace
+
+    from marketsearch.notify.render import download_photos
+
+    detail = store.get_detail(card.listing.listing_id)
+    if detail is None or not detail.photo_urls:
+        return card
+    return replace(card, photos=download_photos(detail.photo_urls))
+
+
+@app.command()
+def preview(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    run_id: int | None = typer.Option(None, "--run", help="Defaults to the latest run."),
+    out: Path = typer.Option(Path("preview.html"), "--out"),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Render the email a run would have sent, and open it in a browser."""
+    import webbrowser
+
+    from marketsearch.notify.render import render_email
+    from marketsearch.shakedown import collect_run_cards
+
+    cfg = _load(config)
+    with Store(db) as store:
+        store.initialize()
+        target = run_id if run_id is not None else store.latest_run_id()
+        if target is None:
+            typer.echo("No runs recorded yet — run `marketsearch run` first.")
+            raise typer.Exit(code=1)
+
+        matches, unverified = collect_run_cards(store, cfg, target)
+        if not (matches or unverified):
+            typer.echo(f"Run {target} produced no matches or unverified listings.")
+            raise typer.Exit(code=0)
+
+        matches = [_with_photos(card, store) for card in matches]
+        unverified = [_with_photos(card, store) for card in unverified]
+
+    email = render_email(matches, unverified, [])
+    out.write_text(email.html, encoding="utf-8")
+    typer.echo(f"Run {target}: {email.subject}\nWrote {out}")
+    if open_browser:
+        webbrowser.open(out.resolve().as_uri())
+
+
+@app.command()
+def replay(
+    search: str = typer.Option(..., "--search", help="Search name from config.yaml."),
+    since: str = typer.Option("30d", "--since", help="e.g. 7d, 36h."),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    save: bool = typer.Option(False, "--save", help="Persist the new verdicts."),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Re-judge stored listings against the criteria currently in config.yaml."""
+    from marketsearch.shakedown import format_replay
+    from marketsearch.shakedown import replay as run_replay
+
+    load_dotenv()
+    setup_logging(DEFAULT_LOG, verbose)
+    cfg = _load(config)
+
+    with Store(db) as store:
+        store.initialize()
+        rows = run_replay(
+            store, cfg, build_extractor(cfg), search_name=search,
+            since=since, save=save,
+        )
+
+    typer.echo(format_replay(rows, search))
+    if not save and rows:
+        typer.echo("\n(Not saved. Re-run with --save to persist these verdicts.)")
+```
+
+Also add `from marketsearch.store import Store` and the `MatchCard` import at the top of `cli.py` if not already present.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `pytest tests/test_shakedown.py tests/test_cli.py -v`
+Expected: 16 shakedown + 5 CLI passed
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/marketsearch/shakedown.py src/marketsearch/store.py src/marketsearch/cli.py \
+        tests/test_shakedown.py
+git commit -m "feat: preview and replay for criteria tuning without scraping"
+```
+
+---
+
+## Task 20: Deployment — scheduling and documentation
+
+**Files:**
+- Create: `scripts/run_marketsearch.ps1`, `scripts/install_task.ps1`, `README.md`
+- Test: manual verification steps below
+
+**Interfaces:**
+- Consumes: the `marketsearch` console entry point (Task 18)
+- Produces: a scheduled task on the Windows box, and the operating manual
+
+The jitter lives in the wrapper script rather than in Task Scheduler, because Task Scheduler's own random-delay option is coarse and applies per-trigger. A short random sleep before each run is what turns a metronomic 30-minute pattern into something unremarkable.
+
+- [ ] **Step 1: Write the run wrapper**
+
+Create `scripts/run_marketsearch.ps1`:
+
+```powershell
+# Wrapper invoked by Task Scheduler.
+# Adds jitter so runs do not land on a perfectly regular cadence, and keeps the
+# tool idle overnight where a listing appearing at 3am will still be there at 7.
+
+param(
+    [string]$ProjectDir = "C:\MarketSearch",
+    [int]$MaxJitterSeconds = 1800,
+    [int]$ActiveStartHour = 7,
+    [int]$ActiveEndHour = 22
+)
+
+$hour = (Get-Date).Hour
+if ($hour -lt $ActiveStartHour -or $hour -ge $ActiveEndHour) {
+    Write-Output "Outside active hours ($ActiveStartHour-$ActiveEndHour); skipping."
+    exit 0
+}
+
+Start-Sleep -Seconds (Get-Random -Minimum 0 -Maximum $MaxJitterSeconds)
+
+Set-Location $ProjectDir
+& "$ProjectDir\.venv\Scripts\marketsearch.exe" run
+exit $LASTEXITCODE
+```
+
+- [ ] **Step 2: Write the task installer**
+
+Create `scripts/install_task.ps1`:
+
+```powershell
+# Registers the scheduled task. Run once, from an elevated PowerShell.
+
+param(
+    [string]$ProjectDir = "C:\MarketSearch",
+    [string]$TaskName = "MarketSearch"
+)
+
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ProjectDir\scripts\run_marketsearch.ps1`" -ProjectDir `"$ProjectDir`""
+
+# Fires every 30 minutes; the wrapper adds up to 30 minutes of jitter on top,
+# producing an effective 30-60 minute cadence.
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 30)
+
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -MultipleInstances IgnoreNew
+
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Settings $settings -RunLevel Limited -Force
+
+Write-Output "Registered '$TaskName'. Verify with: Get-ScheduledTask -TaskName $TaskName"
+```
+
+- [ ] **Step 3: Write the README**
+
+Create `README.md`:
+
+````markdown
+# MarketSearch
+
+Watches Facebook Marketplace for specific heavy equipment, judges each new
+listing against plain-English criteria, and emails you only when something is
+worth looking at.
+
+Design: [`docs/superpowers/specs/2026-07-26-marketsearch-design.md`](docs/superpowers/specs/2026-07-26-marketsearch-design.md)
+
+## What it does
+
+- Searches Marketplace on a jittered 30–60 minute cadence during waking hours.
+- Drops listings that fail cheap gates (price band, title keywords) before
+  loading a single detail page.
+- Reads the survivors' descriptions with Claude, extracting engine hours,
+  specs, stated condition, and attachments, then judging them against your
+  criteria.
+- Sends one email per run with photos embedded, plus a short SMS nudge.
+- Tracks anything you save on Marketplace and reports price drops, edited
+  descriptions, and listings that disappear.
+
+**A note on terms of service.** Automated access to Marketplace violates
+Facebook's ToS. This is a personal-use tool at low volume from a residential
+IP. The realistic worst case is the account being checkpointed or restricted.
+
+## Requirements
+
+- An always-on Windows 11 machine on a residential connection
+- Python 3.12+, Google Chrome
+- An Anthropic API key
+- A Gmail account with an app password (for sending), and a Twilio account
+
+## Setup
+
+```powershell
+git clone <repo> C:\MarketSearch
+cd C:\MarketSearch
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+playwright install chromium
+
+copy config.example.yaml config.yaml
+copy .env.example .env
+```
+
+Edit `.env` with your real secrets — it is gitignored and must never be
+committed. Edit `config.yaml`: set your anchor city, radius, and searches.
+**Leave `notifications.enabled: false` for now.**
+
+Then log in and set your Marketplace location:
+
+```powershell
+marketsearch login
+```
+
+A browser opens. Log into Facebook, open Marketplace, and set your location and
+search radius by hand. Facebook derives Marketplace location from your profile,
+so this is how the tool knows where to look. Close the window when done.
+
+**Set Windows to never sleep** — a sleeping machine runs no sweeps.
+
+## Shakedown
+
+Nothing is emailed until the tool has earned it. Work through this in order.
+
+**1. Confirm scraping works.**
+
+```powershell
+marketsearch test-search "Bobcat T770"
+```
+
+You should see a list of parsed listings. Zero listings with no error means
+Facebook returned nothing; an error means the parser needs attention.
+
+**2. Do a dry run.**
+
+```powershell
+marketsearch run --dry-run
+```
+
+A complete real sweep that writes nothing and sends nothing.
+
+**3. Let it run with alerts off.**
+
+```powershell
+.\scripts\install_task.ps1
+```
+
+Leave it for several days. It scrapes, extracts, and records every decision
+without sending anything.
+
+**4. Read what it would have sent.**
+
+```powershell
+marketsearch preview
+```
+
+Renders the actual email — same code path, photos and all — and opens it in
+your browser.
+
+**5. Tune the criteria.**
+
+Edit a criteria block in `config.yaml`, then:
+
+```powershell
+marketsearch replay --search bobcat-t770 --since 30d
+```
+
+This re-judges stored listings with your new criteria and prints which verdicts
+moved and why. It never touches Facebook, so iterate freely. When you like the
+result, `--save` persists the new verdicts.
+
+**6. Turn on alerts.**
+
+Set `notifications.enabled: true` in `config.yaml`. That's it.
+
+## Day-to-day
+
+| Command | What it does |
+|---|---|
+| `marketsearch run` | One sweep. Task Scheduler calls this. |
+| `marketsearch run --dry-run` | Sweep that writes and sends nothing. |
+| `marketsearch history` | Recent runs and their counters. |
+| `marketsearch preview` | Re-render the last run's email. |
+| `marketsearch replay --search NAME --since 30d` | Re-judge stored listings. |
+| `marketsearch test-search "QUERY"` | Live search, prints parsed results. |
+| `marketsearch login` | Re-authenticate after a checkpoint. |
+
+**Favourites.** Tap Save on any Marketplace listing, from any device signed
+into the same Facebook account. The next run picks it up and starts reporting
+price drops, description edits, and removals. Un-save to stop.
+
+## When something breaks
+
+**"MarketSearch needs you to log in again."** Facebook presented a login wall
+or a security checkpoint. All scraping is paused — deliberately, because
+retrying into a checkpoint is how a soft flag becomes a hard one. Run
+`marketsearch login` on the box, clear it by hand, and runs resume.
+
+**"MarketSearch could not parse a Facebook page."** Facebook changed its
+markup. The offending page is saved under `debug/`. Fix
+`src/marketsearch/sources/parse.py` against it — `tests/test_parse.py` is the
+fastest loop for that — and everything downstream keeps working untouched.
+
+**Silence for days.** Check `marketsearch history`. Runs with zero found
+listings usually mean a session or location problem; runs that are absent
+entirely mean Task Scheduler is not firing.
+
+Logs are in `logs/marketsearch.log`, rotated at 2 MB.
+
+## Costs
+
+Roughly two cents per listing examined at the default `claude-opus-5` /
+`effort: low`, plus about a penny per SMS. At a handful of genuinely new
+listings a day that is a few dollars a month. Switching
+`extraction.model` to `claude-haiku-4-5` drops it to about a third of a cent
+per listing.
+
+## Development
+
+```powershell
+pytest                      # full suite, no network
+pytest -m live_api          # golden-file extraction against the real API
+```
+````
+
+- [ ] **Step 4: Verify the full suite passes**
+
+Run: `pytest -v`
+Expected: every test passes, no network access, `live_api` and `live_fb` deselected.
+
+- [ ] **Step 5: Verify the scheduled task end to end**
+
+1. Run `.\scripts\install_task.ps1` from an elevated PowerShell.
+2. `Get-ScheduledTask -TaskName MarketSearch` — confirm it is registered.
+3. `Start-ScheduledTask -TaskName MarketSearch` — force one run.
+4. Wait for the jitter sleep, then check `logs/marketsearch.log` for a run
+   summary line and `marketsearch history` for a new row.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add README.md scripts/
+git commit -m "docs: readme and windows task scheduler deployment scripts"
+```
+
+---
+
+## Verification checklist
+
+Run through this after Task 20. Every item should already be true.
+
+- [ ] `pytest` passes with no network access
+- [ ] `marketsearch --help` lists `run`, `login`, `test-search`, `history`, `preview`, `replay`
+- [ ] `config.example.yaml` ships `notifications.enabled: false`
+- [ ] `.env` is gitignored and `git log -p` contains no secrets
+- [ ] `marketsearch run --dry-run` leaves the database unchanged
+- [ ] A parse failure writes a file to `debug/` rather than only logging
+- [ ] Killing a run mid-sweep leaves no stale lock older than 6 hours
+- [ ] `pytest -m live_api` passes (costs ~15 cents)
