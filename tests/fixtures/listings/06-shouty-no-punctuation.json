@@ -1,0 +1,8 @@
+{
+  "name": "all caps, no punctuation, hours over the limit",
+  "title": "BOBCAT T770 TRACK LOADER",
+  "price_cents": 2900000,
+  "description": "BOBCAT T770 4600 HOURS RUNS AND WORKS GOOD CAB WITH HEAT AND AC 2 SPEED HIGH FLOW AUX HYDRAULICS COMES WITH BUCKET CALL FOR MORE INFO NO TRADES",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "no_match", "engine_hours": 4600}
+}

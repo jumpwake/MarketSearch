@@ -1,0 +1,8 @@
+{
+  "name": "undercarriage explicitly shot — must be no_match",
+  "title": "2016 Bobcat T770 2400 hours",
+  "price_cents": 2600000,
+  "description": "2016 T770 with 2400 hours. Runs and drives fine. Undercarriage is completely worn out and will need to be replaced, rollers and tracks are done. Priced accordingly. 2 speed, cab with air.",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "no_match", "engine_hours": 2400}
+}

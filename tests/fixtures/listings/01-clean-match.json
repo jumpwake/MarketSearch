@@ -1,0 +1,8 @@
+{
+  "name": "clean match — hours stated plainly",
+  "title": "2019 Bobcat T770 Compact Track Loader",
+  "price_cents": 3800000,
+  "description": "2019 Bobcat T770, 2,400 hours. Enclosed cab with heat and A/C. 2-speed, high flow. Tracks are about 70%. Recently serviced, new filters. Comes with 80\" bucket and forks. One owner, always shedded. Clean machine.",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "match", "engine_hours": 2400, "two_speed": true, "cab_enclosed": true}
+}

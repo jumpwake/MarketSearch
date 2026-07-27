@@ -1,0 +1,8 @@
+{
+  "name": "hours buried mid-paragraph in prose",
+  "title": "Bobcat T770 skid steer track machine",
+  "price_cents": 3500000,
+  "description": "Selling my T770 because I picked up a bigger machine. It has been a great unit for me over the four years I owned it, never left me stranded, and I just put a set of tracks on it last fall so those are basically new. Sitting at twenty eight hundred hours on the meter. Cab is enclosed, air works. Two speed. Priced to sell.",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "match", "engine_hours": 2800, "two_speed": true}
+}

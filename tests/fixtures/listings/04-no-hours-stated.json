@@ -1,0 +1,8 @@
+{
+  "name": "no hours anywhere — must be unverifiable, not no_match",
+  "title": "Bobcat T770",
+  "price_cents": 3800000,
+  "description": "Runs great. $38,000 firm. Serious inquiries only.",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "unverifiable", "engine_hours": null, "unknowns_include": "engine_hours"}
+}

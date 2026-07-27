@@ -1,0 +1,8 @@
+{
+  "name": "hours appear only in the title",
+  "title": "2017 Bobcat T770 1850 HRS 2 SPEED HIGH FLOW",
+  "price_cents": 4200000,
+  "description": "Runs and operates as it should. Call or text.",
+  "criteria": "Under 3000 engine hours. 2-speed required. Enclosed cab with A/C strongly preferred. Reject anything describing major engine or hydraulic problems, or an undercarriage described as worn out or needing replacement.",
+  "expect": {"verdict": "match", "engine_hours": 1850, "two_speed": true}
+}
