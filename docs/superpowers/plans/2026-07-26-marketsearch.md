@@ -1147,7 +1147,7 @@ git commit -m "feat: sqlite schema and listing ledger with relist lookup"
   - `get_state(key: str) -> str | None` / `set_state(key: str, value: str) -> None`
   - `ExtractionRow` frozen dataclass: `listing_id`, `attributes`, `verdict`, `confidence`, `reasoning`, `unknowns`, `model`, `created_at`
 
-Valid `kind` values used across the system: `"match"`, `"unverified"`, `"price_change"`, `"removed"`. Valid `channel` values: `"email"`, `"sms"`.
+Valid `kind` values used across the system: `"match"`, `"unverified"`, `"price_change"`, `"description_change"`, `"removed"`. Valid `channel` values: `"email"`, `"sms"`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2566,8 +2566,10 @@ git commit -m "test: golden-file extraction cases covering hour-parsing edge cas
 **Interfaces:**
 - Consumes: `RawListing`, `ListingDetail` (Task 1)
 - Produces:
-  - `sources/base.py`: `ListingSource` Protocol with `search(query, location, radius_miles) -> list[RawListing]`, `fetch_detail(listing_id) -> ListingDetail`, `fetch_saved() -> list[str]`; exceptions `SourceError`, `LoginRequired`, `ParseError`
-  - `sources/parse.py`: `extract_json_blobs(html) -> list[Any]`, `iter_dicts(obj) -> Iterator[dict]`, `parse_search_results(html) -> list[RawListing]`, `parse_item_detail(html, listing_id) -> ListingDetail`, `parse_saved_ids(html) -> list[str]`, `detect_login_wall(html) -> str | None`
+  - `sources/base.py`: `ListingSource` Protocol with `search(query, location, radius_miles) -> list[RawListing]`, `fetch_detail(listing_id) -> ListingDetail`, `fetch_saved() -> list[RawListing]`; exceptions `SourceError`, `LoginRequired`, `ParseError`
+  - `sources/parse.py`: `extract_json_blobs(html) -> list[Any]`, `iter_dicts(obj) -> Iterator[dict]`, `parse_search_results(html) -> list[RawListing]`, `parse_item_detail(html, listing_id) -> ListingDetail`, `parse_saved_listings(html) -> list[RawListing]`, `detect_login_wall(html) -> str | None`
+
+`fetch_saved` returns full `RawListing` objects, not bare ids. A machine you saved while browsing may never have appeared in a search, so the watched-listing task needs its title, price, and seller to build a card and a fingerprint — an id alone would force a second page load per saved item.
 
 **Design note.** Parsing walks the embedded JSON looking for *nodes with the right keys*, never for a fixed path. Facebook rotates CSS class names and restructures its payload tree constantly, but the leaf key names (`marketplace_listing_title`, `listing_price`) are far more stable. A path-based parser breaks weekly; a key-based one survives most reshuffles.
 
@@ -2669,7 +2671,7 @@ from marketsearch.sources.parse import (
     extract_json_blobs,
     iter_dicts,
     parse_item_detail,
-    parse_saved_ids,
+    parse_saved_listings,
     parse_search_results,
 )
 
@@ -2757,12 +2759,15 @@ def test_parse_item_detail_raises_when_the_listing_node_is_absent(fixtures_dir: 
         parse_item_detail(page(fixtures_dir, "empty_results.html"), "1001")
 
 
-def test_parse_saved_ids(fixtures_dir: Path):
-    assert parse_saved_ids(page(fixtures_dir, "saved.html")) == ["1001", "2002"]
+def test_parse_saved_listings_returns_full_listings(fixtures_dir: Path):
+    saved = parse_saved_listings(page(fixtures_dir, "saved.html"))
+    assert [l.listing_id for l in saved] == ["1001", "2002"]
+    assert saved[0].title == "2019 Bobcat T770 Compact Track Loader"
+    assert saved[1].price_cents == 2_450_000
 
 
-def test_parse_saved_ids_returns_empty_for_an_empty_collection(fixtures_dir: Path):
-    assert parse_saved_ids(page(fixtures_dir, "empty_results.html")) == []
+def test_parse_saved_listings_returns_empty_for_an_empty_collection(fixtures_dir: Path):
+    assert parse_saved_listings(page(fixtures_dir, "empty_results.html")) == []
 
 
 def test_detect_login_wall(fixtures_dir: Path):
@@ -2828,7 +2833,7 @@ class ParseError(SourceError):
 class ListingSource(Protocol):
     def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]: ...
     def fetch_detail(self, listing_id: str) -> ListingDetail: ...
-    def fetch_saved(self) -> list[str]: ...
+    def fetch_saved(self) -> list[RawListing]: ...
 ```
 
 - [ ] **Step 5: Write `sources/parse.py`**
@@ -2977,15 +2982,15 @@ def parse_search_results(html: str) -> list[RawListing]:
     return list(listings.values())
 
 
-def parse_saved_ids(html: str) -> list[str]:
-    """Listing ids from the saved-items page, in order, deduplicated."""
-    seen: list[str] = []
-    for node in _all_dicts(html):
-        if _looks_like_listing(node):
-            listing_id = str(node["id"])
-            if listing_id not in seen:
-                seen.append(listing_id)
-    return seen
+def parse_saved_listings(html: str) -> list[RawListing]:
+    """Listings from the saved-items page.
+
+    The saved page ships the same listing nodes as search, so this is the same
+    walk. It returns full listings rather than ids because a machine saved
+    while browsing may never have appeared in a search — the watched-listing
+    pipeline needs its title and price to build a card without a second fetch.
+    """
+    return parse_search_results(html)
 
 
 def _description(node: dict) -> str:
@@ -3194,14 +3199,16 @@ def test_fetch_detail_returns_parsed_detail(fixtures_dir: Path, tmp_path: Path):
     assert len(detail.photo_urls) == 2
 
 
-def test_fetch_saved_returns_ids(fixtures_dir: Path, tmp_path: Path):
+def test_fetch_saved_returns_full_listings(fixtures_dir: Path, tmp_path: Path):
     src = source_returning(page(fixtures_dir, "saved.html"), tmp_path)
-    assert src.fetch_saved() == ["1001", "2002"]
+    saved = src.fetch_saved()
+    assert [l.listing_id for l in saved] == ["1001", "2002"]
+    assert saved[0].title == "2019 Bobcat T770 Compact Track Loader"
 
 
 def test_source_is_a_context_manager(fixtures_dir: Path, tmp_path: Path):
     with source_returning(page(fixtures_dir, "saved.html"), tmp_path) as src:
-        assert src.fetch_saved() == ["1001", "2002"]
+        assert [l.listing_id for l in src.fetch_saved()] == ["1001", "2002"]
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -3240,7 +3247,7 @@ from marketsearch.sources.base import LoginRequired, ParseError, SourceError
 from marketsearch.sources.parse import (
     detect_login_wall,
     parse_item_detail,
-    parse_saved_ids,
+    parse_saved_listings,
     parse_search_results,
 )
 
@@ -3383,10 +3390,10 @@ class FacebookSource:
             self._save_debug(f"item-{listing_id}", html)
             raise
 
-    def fetch_saved(self) -> list[str]:
+    def fetch_saved(self) -> list[RawListing]:
         html = self._load(SAVED_URL, "saved")
         try:
-            return parse_saved_ids(html)
+            return parse_saved_listings(html)
         except ParseError:
             self._save_debug("saved", html)
             raise
@@ -3984,4 +3991,1757 @@ Expected: 17 passed
 ```bash
 git add src/marketsearch/notify tests/test_render.py
 git commit -m "feat: html email rendering with inline photos and sms nudge"
+```
+
+---
+
+## Task 13: Delivery and notification idempotency
+
+**Files:**
+- Create: `src/marketsearch/notify/delivery.py`
+- Test: `tests/test_delivery.py`
+
+**Interfaces:**
+- Consumes: `RenderedEmail` (Task 12), `Config` (Task 2), `Store` (Task 5)
+- Produces:
+  - `build_mime(email: RenderedEmail, from_addr: str, to_addr: str) -> EmailMessage`
+  - `EmailSender(config: EmailConfig, password: str, smtp_factory=None)` with `.send(email: RenderedEmail) -> None`
+  - `SmsSender(config: SmsConfig, account_sid: str, auth_token: str, client_factory=None)` with `.send(text: str) -> None`
+  - `Dispatcher(store, email_sender, sms_sender, enabled: bool)` with `.dispatch(matches, unverified, changes) -> bool` (returns whether anything was sent)
+  - `DeliveryError(Exception)`
+  - `resolve_secret(env_name: str) -> str`
+
+`Dispatcher` owns the two rules that keep the inbox trustworthy: **nothing is sent when `enabled` is False**, and **a listing is never alerted on twice for the same kind**, because `notifications` rows are only written on a confirmed send.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_delivery.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.config import EmailConfig, SmsConfig
+from marketsearch.notify.delivery import (
+    DeliveryError,
+    Dispatcher,
+    EmailSender,
+    SmsSender,
+    build_mime,
+    resolve_secret,
+)
+from marketsearch.notify.render import ChangeCard, MatchCard, RenderedEmail
+from marketsearch.models import RawListing
+from marketsearch.store import ExtractionRow, ListingRow, Store
+
+
+def email_config() -> EmailConfig:
+    return EmailConfig.model_validate({
+        "to": "me@example.com", "from": "bot@example.com",
+        "smtp_host": "smtp.example.com", "smtp_port": 587,
+        "username": "bot@example.com", "password_env": "TEST_SMTP_PASSWORD",
+    })
+
+
+def sms_config() -> SmsConfig:
+    return SmsConfig(to="+15555550100", twilio_from="+15555550101",
+                     account_sid_env="TEST_SID", auth_token_env="TEST_TOKEN")
+
+
+def rendered(images=None) -> RenderedEmail:
+    return RenderedEmail(subject="MarketSearch: 1 new match",
+                         html="<html><body>hi <img src='cid:photo-1'></body></html>",
+                         images=images if images is not None else [("photo-1", b"\x89PNG")])
+
+
+class FakeSMTP:
+    instances: list["FakeSMTP"] = []
+
+    def __init__(self, host: str, port: int, timeout: float = 30.0):
+        self.host, self.port = host, port
+        self.started_tls = False
+        self.logged_in_as: str | None = None
+        self.sent: list[object] = []
+        FakeSMTP.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def starttls(self):
+        self.started_tls = True
+
+    def login(self, username: str, password: str):
+        self.logged_in_as = username
+
+    def send_message(self, message):
+        self.sent.append(message)
+
+
+class FakeTwilio:
+    def __init__(self, sid: str, token: str):
+        self.sid = sid
+        self.sent: list[dict] = []
+        self.messages = self
+
+    def create(self, body: str, from_: str, to: str):
+        self.sent.append({"body": body, "from_": from_, "to": to})
+
+
+@pytest.fixture(autouse=True)
+def _reset_smtp():
+    FakeSMTP.instances.clear()
+
+
+def test_resolve_secret_reads_the_environment(monkeypatch):
+    monkeypatch.setenv("SOME_SECRET", "abc123")
+    assert resolve_secret("SOME_SECRET") == "abc123"
+
+
+def test_resolve_secret_raises_a_clear_error_when_missing(monkeypatch):
+    monkeypatch.delenv("MISSING_SECRET", raising=False)
+    with pytest.raises(DeliveryError, match="MISSING_SECRET"):
+        resolve_secret("MISSING_SECRET")
+
+
+def test_build_mime_sets_headers_and_html():
+    message = build_mime(rendered(), "bot@example.com", "me@example.com")
+    assert message["Subject"] == "MarketSearch: 1 new match"
+    assert message["From"] == "bot@example.com"
+    assert message["To"] == "me@example.com"
+
+
+def test_build_mime_attaches_images_with_matching_cids():
+    message = build_mime(rendered(), "bot@example.com", "me@example.com")
+    cids = [part["Content-ID"] for part in message.walk() if part.get("Content-ID")]
+    assert "<photo-1>" in cids
+
+
+def test_build_mime_without_images_is_still_valid():
+    message = build_mime(rendered(images=[]), "bot@example.com", "me@example.com")
+    assert message["Subject"]
+
+
+def test_email_sender_uses_starttls_and_logs_in():
+    sender = EmailSender(email_config(), password="secret", smtp_factory=FakeSMTP)
+    sender.send(rendered())
+    smtp = FakeSMTP.instances[0]
+    assert smtp.started_tls is True
+    assert smtp.logged_in_as == "bot@example.com"
+    assert len(smtp.sent) == 1
+
+
+def test_email_sender_wraps_failures_in_delivery_error():
+    class Boom(FakeSMTP):
+        def send_message(self, message):
+            raise OSError("connection reset")
+
+    sender = EmailSender(email_config(), password="secret", smtp_factory=Boom)
+    with pytest.raises(DeliveryError, match="email send failed"):
+        sender.send(rendered())
+
+
+def test_sms_sender_sends_body_from_and_to():
+    fake = FakeTwilio("sid", "token")
+    sender = SmsSender(sms_config(), "sid", "token", client_factory=lambda s, t: fake)
+    sender.send("MarketSearch: 1 new match — check email.")
+    assert fake.sent[0]["to"] == "+15555550100"
+    assert fake.sent[0]["from_"] == "+15555550101"
+    assert "1 new match" in fake.sent[0]["body"]
+```
+
+Continue the same file with the `Dispatcher` tests:
+
+```python
+def listing_row(listing_id="1") -> ListingRow:
+    return ListingRow(
+        listing_id=listing_id, search_name="bobcat-t770", title="2019 Bobcat T770",
+        price_cents=3_800_000, location="Olathe, KS",
+        url=f"https://www.facebook.com/marketplace/item/{listing_id}/",
+        thumbnail_url=None, seller_name="Dale S", fingerprint="fp", stage="matched",
+        reject_reason=None, watched=False, first_seen_at="2026-07-26T10:00:00+00:00",
+        last_seen_at="2026-07-26T10:00:00+00:00", last_change_check_at=None,
+    )
+
+
+def extraction_row(listing_id="1") -> ExtractionRow:
+    return ExtractionRow(
+        listing_id=listing_id, attributes={"core": {"engine_hours": 2400}},
+        verdict="match", confidence=0.9, reasoning="under the limit",
+        unknowns=[], model="claude-opus-5", created_at="2026-07-26T10:00:00+00:00",
+    )
+
+
+class RecordingEmail:
+    def __init__(self):
+        self.sent: list[RenderedEmail] = []
+
+    def send(self, email: RenderedEmail) -> None:
+        self.sent.append(email)
+
+
+class RecordingSms:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "d.db")
+    s.initialize()
+    for listing_id in ("1", "2"):
+        s.upsert_listing(
+            RawListing(listing_id=listing_id, title="T770", price_cents=3_800_000,
+                       location=None, url=f"https://example.com/{listing_id}",
+                       thumbnail_url=None, seller_name=None),
+            "bobcat-t770", "fp",
+        )
+    yield s
+    s.close()
+
+
+def make_dispatcher(store, enabled=True):
+    email, sms = RecordingEmail(), RecordingSms()
+    return Dispatcher(store, email, sms, enabled=enabled), email, sms
+
+
+def test_dispatch_sends_one_email_and_one_sms(store: Store):
+    dispatcher, email, sms = make_dispatcher(store)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    assert dispatcher.dispatch([card], [], []) is True
+    assert len(email.sent) == 1
+    assert len(sms.sent) == 1
+
+
+def test_dispatch_sends_nothing_when_disabled(store: Store):
+    dispatcher, email, sms = make_dispatcher(store, enabled=False)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    assert dispatcher.dispatch([card], [], []) is False
+    assert email.sent == []
+    assert sms.sent == []
+
+
+def test_dispatch_sends_nothing_when_there_is_nothing_to_say(store: Store):
+    dispatcher, email, sms = make_dispatcher(store)
+    assert dispatcher.dispatch([], [], []) is False
+    assert email.sent == []
+
+
+def test_already_notified_listings_are_filtered_out(store: Store):
+    dispatcher, email, _ = make_dispatcher(store)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    dispatcher.dispatch([card], [], [])
+    dispatcher2, email2, _ = make_dispatcher(store)
+    assert dispatcher2.dispatch([card], [], []) is False
+    assert email2.sent == []
+
+
+def test_new_listing_still_sends_when_another_was_already_notified(store: Store):
+    dispatcher, email, _ = make_dispatcher(store)
+    first = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    dispatcher.dispatch([first], [], [])
+
+    dispatcher2, email2, _ = make_dispatcher(store)
+    second = MatchCard(listing=listing_row("2"), extraction=extraction_row("2"), photos=[])
+    assert dispatcher2.dispatch([first, second], [], []) is True
+    assert "2 new" not in email2.sent[0].subject  # only the unseen one is included
+
+
+def test_notification_rows_are_written_only_after_a_successful_send(store: Store):
+    class Failing:
+        def send(self, email):
+            raise DeliveryError("smtp down")
+
+    dispatcher = Dispatcher(store, Failing(), RecordingSms(), enabled=True)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    with pytest.raises(DeliveryError):
+        dispatcher.dispatch([card], [], [])
+    assert store.already_notified("1", "email", "match") is False
+
+
+def test_sms_failure_does_not_undo_a_successful_email(store: Store):
+    class FailingSms:
+        def send(self, text):
+            raise DeliveryError("twilio down")
+
+    email = RecordingEmail()
+    dispatcher = Dispatcher(store, email, FailingSms(), enabled=True)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    assert dispatcher.dispatch([card], [], []) is True
+    assert len(email.sent) == 1
+    assert store.already_notified("1", "email", "match") is True
+    assert store.already_notified("1", "sms", "match") is False
+
+
+def test_price_change_and_match_are_tracked_separately(store: Store):
+    dispatcher, _, _ = make_dispatcher(store)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    dispatcher.dispatch([card], [], [])
+
+    dispatcher2, email2, _ = make_dispatcher(store)
+    change = ChangeCard(listing=listing_row("1"), kind="price_change",
+                        old_price_cents=4_100_000, new_price_cents=3_800_000)
+    assert dispatcher2.dispatch([], [], [change]) is True
+    assert len(email2.sent) == 1
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_delivery.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.notify.delivery'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/marketsearch/notify/delivery.py`:
+
+```python
+"""Sending, and the rules that keep the inbox worth reading.
+
+Two invariants:
+  * nothing is sent unless notifications are explicitly enabled;
+  * a listing is never alerted on twice for the same reason, because the
+    notifications table is only written after a confirmed send.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import smtplib
+from email.message import EmailMessage
+from typing import Callable, Protocol
+
+from marketsearch.config import EmailConfig, SmsConfig
+from marketsearch.notify.render import (
+    ChangeCard,
+    MatchCard,
+    RenderedEmail,
+    render_email,
+    render_sms,
+)
+from marketsearch.store import Store
+
+log = logging.getLogger(__name__)
+
+_SMTP_TIMEOUT_S = 30.0
+
+
+class DeliveryError(Exception):
+    """A notification could not be delivered."""
+
+
+def resolve_secret(env_name: str) -> str:
+    value = os.environ.get(env_name)
+    if not value:
+        raise DeliveryError(
+            f"environment variable {env_name} is not set — add it to your .env file"
+        )
+    return value
+
+
+def build_mime(email: RenderedEmail, from_addr: str, to_addr: str) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = email.subject
+    message["From"] = from_addr
+    message["To"] = to_addr
+    message.set_content(
+        "This message contains listing photos and formatting. "
+        "View it in an HTML-capable mail client."
+    )
+    message.add_alternative(email.html, subtype="html")
+
+    html_part = message.get_payload()[-1]
+    for cid, data in email.images:
+        html_part.add_related(data, maintype="image", subtype="jpeg", cid=f"<{cid}>")
+    return message
+
+
+class EmailSender:
+    def __init__(
+        self,
+        config: EmailConfig,
+        password: str,
+        smtp_factory: Callable[..., smtplib.SMTP] | None = None,
+    ) -> None:
+        self._config = config
+        self._password = password
+        self._smtp_factory = smtp_factory or smtplib.SMTP
+
+    def send(self, email: RenderedEmail) -> None:
+        message = build_mime(email, self._config.from_, self._config.to)
+        try:
+            with self._smtp_factory(
+                self._config.smtp_host, self._config.smtp_port, timeout=_SMTP_TIMEOUT_S
+            ) as smtp:
+                smtp.starttls()
+                smtp.login(self._config.username, self._password)
+                smtp.send_message(message)
+        except Exception as exc:
+            raise DeliveryError(f"email send failed: {exc}") from exc
+        log.info("sent email: %s", email.subject)
+
+
+class SmsSender:
+    def __init__(
+        self,
+        config: SmsConfig,
+        account_sid: str,
+        auth_token: str,
+        client_factory: Callable[[str, str], object] | None = None,
+    ) -> None:
+        self._config = config
+        self._sid = account_sid
+        self._token = auth_token
+        self._client_factory = client_factory
+
+    def _client(self):
+        if self._client_factory is not None:
+            return self._client_factory(self._sid, self._token)
+        from twilio.rest import Client
+
+        return Client(self._sid, self._token)
+
+    def send(self, text: str) -> None:
+        try:
+            self._client().messages.create(
+                body=text, from_=self._config.twilio_from, to=self._config.to
+            )
+        except Exception as exc:
+            raise DeliveryError(f"sms send failed: {exc}") from exc
+        log.info("sent sms: %s", text)
+
+
+class _EmailChannel(Protocol):
+    def send(self, email: RenderedEmail) -> None: ...
+
+
+class _SmsChannel(Protocol):
+    def send(self, text: str) -> None: ...
+
+
+class Dispatcher:
+    def __init__(
+        self,
+        store: Store,
+        email_sender: _EmailChannel,
+        sms_sender: _SmsChannel,
+        enabled: bool,
+    ) -> None:
+        self._store = store
+        self._email = email_sender
+        self._sms = sms_sender
+        self._enabled = enabled
+
+    def dispatch(
+        self,
+        matches: list[MatchCard],
+        unverified: list[MatchCard],
+        changes: list[ChangeCard],
+    ) -> bool:
+        """Send at most one email and one SMS. Returns True if anything went out."""
+        matches = [c for c in matches
+                   if not self._store.already_notified(c.listing.listing_id, "email", "match")]
+        unverified = [c for c in unverified
+                      if not self._store.already_notified(
+                          c.listing.listing_id, "email", "unverified")]
+        changes = [c for c in changes
+                   if not self._store.already_notified(
+                       c.listing.listing_id, "email", c.kind)]
+
+        if not (matches or unverified or changes):
+            return False
+
+        if not self._enabled:
+            log.info(
+                "notifications disabled — would have sent %d match(es), %d unverified, "
+                "%d change(s)",
+                len(matches), len(unverified), len(changes),
+            )
+            return False
+
+        self._email.send(render_email(matches, unverified, changes))
+
+        for card in matches:
+            self._store.record_notification(card.listing.listing_id, "email", "match", "sent")
+        for card in unverified:
+            self._store.record_notification(
+                card.listing.listing_id, "email", "unverified", "sent")
+        for change in changes:
+            self._store.record_notification(
+                change.listing.listing_id, "email", change.kind, "sent")
+
+        # The SMS is only a nudge. Losing it must not cost the email, whose
+        # notification rows are already committed above.
+        try:
+            self._sms.send(render_sms(matches, unverified, changes))
+        except DeliveryError as exc:
+            log.warning("sms nudge failed (email was delivered): %s", exc)
+        else:
+            for card in matches:
+                self._store.record_notification(
+                    card.listing.listing_id, "sms", "match", "sent")
+
+        return True
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_delivery.py -v`
+Expected: 17 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/marketsearch/notify/delivery.py tests/test_delivery.py
+git commit -m "feat: smtp and twilio delivery with per-listing idempotency"
+```
+
+---
+
+## Task 14: Run state, locking, and operational alert throttling
+
+**Files:**
+- Create: `src/marketsearch/runstate.py`, `src/marketsearch/logging_setup.py`
+- Test: `tests/test_runstate.py`
+
+**Interfaces:**
+- Consumes: `Store` (Task 5)
+- Produces:
+  - `AlreadyRunning(Exception)`
+  - `RunLock(path: Path, stale_after_hours: int = 6)` — context manager, raises `AlreadyRunning`
+  - `set_needs_login(store, kind: str) -> None`, `clear_needs_login(store) -> bool`, `needs_login(store) -> str | None`
+  - `OperationalAlerts(store, now: Callable[[], datetime] | None = None)` with `.should_send(problem: str) -> bool`, `.mark_sent(problem: str) -> None`, `.clear(problem: str) -> bool`
+  - `setup_logging(log_path: Path, verbose: bool = False) -> None`
+
+**Why throttling matters.** A tool that emails every 45 minutes about being broken gets filtered to spam — and then the real matches go unseen too. Operational problems alert once per 24 hours, with a single "back to normal" message when they clear.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_runstate.py`:
+
+```python
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from marketsearch.runstate import (
+    AlreadyRunning,
+    OperationalAlerts,
+    RunLock,
+    clear_needs_login,
+    needs_login,
+    set_needs_login,
+)
+from marketsearch.store import Store
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "r.db")
+    s.initialize()
+    yield s
+    s.close()
+
+
+def test_lock_is_acquired_and_released(tmp_path: Path):
+    path = tmp_path / "run.lock"
+    with RunLock(path):
+        assert path.exists()
+    assert not path.exists()
+
+
+def test_second_lock_raises_already_running(tmp_path: Path):
+    path = tmp_path / "run.lock"
+    with RunLock(path):
+        with pytest.raises(AlreadyRunning):
+            with RunLock(path):
+                pass
+
+
+def test_lock_released_even_when_body_raises(tmp_path: Path):
+    path = tmp_path / "run.lock"
+    with pytest.raises(ValueError):
+        with RunLock(path):
+            raise ValueError("boom")
+    assert not path.exists()
+
+
+def test_stale_lock_is_reclaimed(tmp_path: Path):
+    """A machine that lost power mid-run must not be wedged forever."""
+    path = tmp_path / "run.lock"
+    path.write_text("99999", encoding="utf-8")
+    old = (datetime.now(timezone.utc) - timedelta(hours=12)).timestamp()
+    import os
+    os.utime(path, (old, old))
+
+    with RunLock(path, stale_after_hours=6):
+        assert path.exists()
+
+
+def test_fresh_lock_is_not_reclaimed(tmp_path: Path):
+    path = tmp_path / "run.lock"
+    path.write_text("99999", encoding="utf-8")
+    with pytest.raises(AlreadyRunning):
+        with RunLock(path, stale_after_hours=6):
+            pass
+
+
+def test_needs_login_roundtrip(store: Store):
+    assert needs_login(store) is None
+    set_needs_login(store, "checkpoint")
+    assert needs_login(store) == "checkpoint"
+
+
+def test_clear_needs_login_reports_whether_it_was_set(store: Store):
+    assert clear_needs_login(store) is False
+    set_needs_login(store, "login")
+    assert clear_needs_login(store) is True
+    assert needs_login(store) is None
+
+
+def test_first_operational_alert_is_allowed(store: Store):
+    alerts = OperationalAlerts(store)
+    assert alerts.should_send("parse_failure") is True
+
+
+def test_second_alert_within_24h_is_suppressed(store: Store):
+    alerts = OperationalAlerts(store)
+    alerts.mark_sent("parse_failure")
+    assert alerts.should_send("parse_failure") is False
+
+
+def test_alert_is_allowed_again_after_24h(store: Store):
+    now = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    alerts = OperationalAlerts(store, now=lambda: now)
+    alerts.mark_sent("parse_failure")
+
+    later = now + timedelta(hours=25)
+    alerts_later = OperationalAlerts(store, now=lambda: later)
+    assert alerts_later.should_send("parse_failure") is True
+
+
+def test_different_problems_throttle_independently(store: Store):
+    alerts = OperationalAlerts(store)
+    alerts.mark_sent("parse_failure")
+    assert alerts.should_send("needs_login") is True
+
+
+def test_clear_reports_whether_an_all_clear_is_warranted(store: Store):
+    alerts = OperationalAlerts(store)
+    assert alerts.clear("parse_failure") is False
+    alerts.mark_sent("parse_failure")
+    assert alerts.clear("parse_failure") is True
+    assert alerts.clear("parse_failure") is False
+    assert alerts.should_send("parse_failure") is True
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_runstate.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.runstate'`
+
+- [ ] **Step 3: Write `runstate.py`**
+
+Create `src/marketsearch/runstate.py`:
+
+```python
+"""Operational state: the run lock, the needs-login flag, and alert throttling."""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable
+
+from marketsearch.store import Store
+
+log = logging.getLogger(__name__)
+
+NEEDS_LOGIN_KEY = "needs_login"
+_ALERT_KEY_PREFIX = "alert_last_sent:"
+_ALERT_INTERVAL_HOURS = 24
+
+
+class AlreadyRunning(Exception):
+    """Another sweep is in progress."""
+
+
+class RunLock:
+    """Prevents a slow sweep from colliding with the next scheduled one.
+
+    A lock older than `stale_after_hours` is reclaimed, so a machine that lost
+    power mid-run is not wedged until someone notices.
+    """
+
+    def __init__(self, path: Path, stale_after_hours: int = 6) -> None:
+        self.path = Path(path)
+        self.stale_after_hours = stale_after_hours
+        self._held = False
+
+    def __enter__(self) -> "RunLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if not self._is_stale():
+                raise AlreadyRunning(f"another run holds {self.path}") from None
+            log.warning("reclaiming stale lock at %s", self.path)
+            self.path.unlink(missing_ok=True)
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(os.getpid()))
+        self._held = True
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._held:
+            self.path.unlink(missing_ok=True)
+            self._held = False
+
+    def _is_stale(self) -> bool:
+        try:
+            age = datetime.now(timezone.utc).timestamp() - self.path.stat().st_mtime
+        except FileNotFoundError:
+            return True
+        return age > self.stale_after_hours * 3600
+
+
+def set_needs_login(store: Store, kind: str) -> None:
+    store.set_state(NEEDS_LOGIN_KEY, kind)
+
+
+def needs_login(store: Store) -> str | None:
+    value = store.get_state(NEEDS_LOGIN_KEY)
+    return value or None
+
+
+def clear_needs_login(store: Store) -> bool:
+    """Clear the flag. Returns True if it had been set."""
+    was_set = needs_login(store) is not None
+    store.set_state(NEEDS_LOGIN_KEY, "")
+    return was_set
+
+
+class OperationalAlerts:
+    """One alert per problem per 24 hours, plus one all-clear when it resolves."""
+
+    def __init__(self, store: Store, now: Callable[[], datetime] | None = None) -> None:
+        self._store = store
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def _key(self, problem: str) -> str:
+        return f"{_ALERT_KEY_PREFIX}{problem}"
+
+    def should_send(self, problem: str) -> bool:
+        raw = self._store.get_state(self._key(problem))
+        if not raw:
+            return True
+        last = datetime.fromisoformat(raw)
+        return self._now() - last >= timedelta(hours=_ALERT_INTERVAL_HOURS)
+
+    def mark_sent(self, problem: str) -> None:
+        self._store.set_state(self._key(problem), self._now().isoformat())
+
+    def clear(self, problem: str) -> bool:
+        """Reset the throttle. Returns True if an alert was outstanding, which
+        is the caller's cue to send a single 'back to normal' message."""
+        was_active = bool(self._store.get_state(self._key(problem)))
+        self._store.set_state(self._key(problem), "")
+        return was_active
+```
+
+- [ ] **Step 4: Write `logging_setup.py`**
+
+Create `src/marketsearch/logging_setup.py`:
+
+```python
+"""Rotating file log plus console output."""
+
+from __future__ import annotations
+
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+_MAX_BYTES = 2_000_000
+_BACKUPS = 5
+
+
+def setup_logging(log_path: Path, verbose: bool = False) -> None:
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=_MAX_BYTES, backupCount=_BACKUPS, encoding="utf-8"
+    )
+    file_handler.setFormatter(logging.Formatter(_FORMAT))
+    file_handler.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)-7s %(message)s"))
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root.addHandler(console)
+
+    # Playwright and httpx are chatty at DEBUG.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `pytest tests/test_runstate.py -v`
+Expected: 12 passed
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/marketsearch/runstate.py src/marketsearch/logging_setup.py tests/test_runstate.py
+git commit -m "feat: run lock, needs-login flag, and operational alert throttling"
+```
+
+---
+
+## Task 15: Scan pipeline
+
+**Files:**
+- Create: `src/marketsearch/pipeline.py`
+- Test: `tests/test_pipeline_scan.py`
+
+**Interfaces:**
+- Consumes: `Config` (Task 2), `Store` (Task 5), `prefilter` (Task 6), `Extractor`/`ExtractionError` (Task 8), `ListingSource`/`ParseError` (Task 10), `MatchCard`/`download_photos` (Task 12), `fingerprint` (Task 3)
+- Produces:
+  - `ScanCounters` dataclass: `found`, `new`, `prefiltered`, `extracted`, `matched`, `errors` (all `int`, default 0), plus `.as_dict() -> dict[str, int]`
+  - `ScanOutcome` frozen dataclass: `.matches: list[MatchCard]`, `.unverified: list[MatchCard]`, `.counters: ScanCounters`
+  - `Scanner(config, store, source, extractor, photo_fetcher=download_photos, dry_run=False)` with `.scan() -> ScanOutcome`
+  - `RELIST_WINDOW_DAYS = 60`
+  - `content_hash(detail: ListingDetail) -> str`
+  - `listing_row_from(listing: RawListing, search_name: str, fp: str, stage: str) -> ListingRow`
+
+**Ordering is load-bearing.** Dedupe before prefilter means a listing is examined once in its life. Prefilter before detail means no detail page — the most bot-visible action — is loaded for a machine outside the price band. Extraction runs only on listings that already cleared the cheap gates.
+
+`LoginRequired` is deliberately **not** caught here. It must propagate to the caller, which stops the whole run.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_pipeline_scan.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.config import Config
+from marketsearch.extract import ExtractionError, ExtractionResult
+from marketsearch.extraction_models import Extraction
+from marketsearch.models import ListingDetail, RawListing
+from marketsearch.pipeline import Scanner
+from marketsearch.sources.base import LoginRequired, ParseError
+from marketsearch.store import Store
+
+CONFIG_DICT = {
+    "account": {"profile_dir": "profile"},
+    "location": {"anchor": "Olathe, KS", "radius_miles": 250},
+    "extraction": {"model": "claude-opus-5", "effort": "low", "max_extractions_per_run": 25},
+    "notifications": {
+        "email": {"to": "a@b.c", "from": "d@e.f", "smtp_host": "h", "smtp_port": 587,
+                  "username": "u", "password_env": "P"},
+        "sms": {"to": "+1", "twilio_from": "+2", "account_sid_env": "S",
+                "auth_token_env": "T"},
+    },
+    "searches": [{
+        "name": "bobcat-t770", "query": "Bobcat T770",
+        "price_min_cents": 1_500_000, "price_max_cents": 6_000_000,
+        "title_must_match": ["t770"], "title_must_not_match": ["wanted"],
+        "on_unknown": "alert", "criteria": "Under 3000 engine hours.",
+    }],
+}
+
+
+def config(**overrides) -> Config:
+    data = {**CONFIG_DICT, **overrides}
+    return Config.model_validate(data)
+
+
+def listing(listing_id: str, title="2019 Bobcat T770", price_cents=3_800_000) -> RawListing:
+    return RawListing(
+        listing_id=listing_id, title=title, price_cents=price_cents,
+        location="Olathe, KS", url=f"https://example.com/{listing_id}",
+        thumbnail_url=None, seller_name="Dale S",
+    )
+
+
+def extraction(verdict="match", unknowns=None) -> Extraction:
+    return Extraction.model_validate({
+        "core": {"year": 2019, "make_model": "Bobcat T770", "engine_hours": 2400,
+                 "asking_price": 38000, "location": "Olathe, KS"},
+        "specs": {"cab_enclosed": True, "has_ac": True, "two_speed": True,
+                  "high_flow": False, "tracks_or_tires": "tracks",
+                  "undercarriage_condition": "good", "aux_hydraulics": True},
+        "condition": {"runs": True, "stated_issues": [], "recent_service": [],
+                      "damage_notes": None, "one_owner_claim": False},
+        "deal": {"attachments": [], "seller_type": "private",
+                 "financing_or_trade": False, "price_vs_market_note": None},
+        "verdict": verdict, "confidence": 0.9, "reasoning": "reasons",
+        "unknowns": unknowns or [],
+    })
+
+
+class FakeSource:
+    def __init__(self, results=None, detail_error=None):
+        self.results = results or []
+        self.detail_error = detail_error
+        self.detail_calls: list[str] = []
+
+    def search(self, query, location, radius_miles):
+        return list(self.results)
+
+    def fetch_detail(self, listing_id):
+        self.detail_calls.append(listing_id)
+        if self.detail_error is not None:
+            raise self.detail_error
+        return ListingDetail(
+            listing_id=listing_id, description="2400 hours",
+            structured_fields={}, photo_urls=["https://example.com/p.jpg"],
+            distance_miles=None,
+        )
+
+    def fetch_saved(self):
+        return []
+
+
+class FakeExtractor:
+    def __init__(self, result=None, error=None):
+        self._result = result or extraction()
+        self._error = error
+        self.calls = 0
+
+    def extract(self, listing, detail, criteria):
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return ExtractionResult(
+            extraction=self._result, input_tokens=1500,
+            output_tokens=400, cost_cents=1.75,
+        )
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "p.db")
+    s.initialize()
+    yield s
+    s.close()
+
+
+def scanner(store, source, extractor=None, cfg=None, **kwargs) -> Scanner:
+    return Scanner(
+        config=cfg or config(), store=store, source=source,
+        extractor=extractor or FakeExtractor(),
+        photo_fetcher=lambda urls, limit=3: [b"img"],
+        **kwargs,
+    )
+
+
+def test_a_matching_listing_produces_a_match_card(store: Store):
+    outcome = scanner(store, FakeSource([listing("1")])).scan()
+    assert len(outcome.matches) == 1
+    assert outcome.matches[0].listing.listing_id == "1"
+    assert outcome.counters.matched == 1
+
+
+def test_match_card_carries_photos(store: Store):
+    outcome = scanner(store, FakeSource([listing("1")])).scan()
+    assert outcome.matches[0].photos == [b"img"]
+
+
+def test_already_seen_listings_are_skipped_entirely(store: Store):
+    source = FakeSource([listing("1")])
+    extractor = FakeExtractor()
+    scanner(store, source, extractor).scan()
+    scanner(store, FakeSource([listing("1")]), extractor).scan()
+    assert extractor.calls == 1
+
+
+def test_prefiltered_listing_never_loads_a_detail_page(store: Store):
+    source = FakeSource([listing("1", title="WANTED Bobcat T770")])
+    outcome = scanner(store, source).scan()
+    assert source.detail_calls == []
+    assert outcome.counters.prefiltered == 1
+    assert outcome.matches == []
+
+
+def test_prefilter_reason_is_recorded(store: Store):
+    scanner(store, FakeSource([listing("1", price_cents=9_000_000)])).scan()
+    row = store.get_listing("1")
+    assert row.stage == "prefiltered_out"
+    assert "above" in row.reject_reason
+
+
+def test_repost_within_the_window_is_suppressed(store: Store):
+    scanner(store, FakeSource([listing("1")])).scan()
+    reposted = listing("2")  # same title, price, seller, location -> same fingerprint
+    outcome = scanner(store, FakeSource([reposted])).scan()
+    assert outcome.matches == []
+    assert "repost" in store.get_listing("2").reject_reason
+
+
+def test_repost_at_a_lower_price_still_alerts(store: Store):
+    scanner(store, FakeSource([listing("1", price_cents=4_100_000)])).scan()
+    outcome = scanner(store, FakeSource([listing("2", price_cents=3_800_000)])).scan()
+    assert len(outcome.matches) == 1
+
+
+def test_unverifiable_verdict_goes_to_the_unverified_bucket(store: Store):
+    extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor).scan()
+    assert outcome.matches == []
+    assert len(outcome.unverified) == 1
+
+
+def test_on_unknown_skip_drops_unverifiable_listings(store: Store):
+    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor, cfg=cfg).scan()
+    assert outcome.unverified == []
+
+
+def test_no_match_produces_no_card_but_is_recorded(store: Store):
+    extractor = FakeExtractor(extraction("no_match"))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor).scan()
+    assert outcome.matches == []
+    assert outcome.unverified == []
+    assert store.latest_extraction("1").verdict == "no_match"
+    assert store.get_listing("1").stage == "extracted"
+
+
+def test_extraction_failure_leaves_the_listing_pending_for_retry(store: Store):
+    extractor = FakeExtractor(error=ExtractionError("api down"))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor).scan()
+    assert outcome.counters.errors == 1
+    assert store.get_listing("1").stage == "pending"
+
+
+def test_detail_parse_failure_leaves_the_listing_pending(store: Store):
+    source = FakeSource([listing("1")], detail_error=ParseError("markup changed"))
+    outcome = scanner(store, source).scan()
+    assert outcome.counters.errors == 1
+    assert store.get_listing("1").stage == "pending"
+
+
+def test_login_required_propagates_rather_than_being_swallowed(store: Store):
+    class Blocked(FakeSource):
+        def search(self, query, location, radius_miles):
+            raise LoginRequired("checkpoint")
+
+    with pytest.raises(LoginRequired):
+        scanner(store, Blocked()).scan()
+
+
+def test_extraction_budget_is_respected(store: Store):
+    cfg = config(extraction={"model": "claude-opus-5", "effort": "low",
+                             "max_extractions_per_run": 2})
+    source = FakeSource([listing(str(i)) for i in range(5)])
+    extractor = FakeExtractor()
+    # Distinct prices so each listing has a distinct fingerprint.
+    source.results = [listing(str(i), price_cents=3_000_000 + i * 10_000) for i in range(5)]
+    scanner(store, source, extractor, cfg=cfg).scan()
+    assert extractor.calls == 2
+
+
+def test_listings_beyond_the_budget_stay_pending_for_the_next_run(store: Store):
+    cfg = config(extraction={"model": "claude-opus-5", "effort": "low",
+                             "max_extractions_per_run": 1})
+    source = FakeSource([listing(str(i), price_cents=3_000_000 + i * 10_000)
+                         for i in range(3)])
+    scanner(store, source, cfg=cfg).scan()
+    pending = [store.get_listing(str(i)).stage for i in range(3)]
+    assert pending.count("pending") == 2
+
+
+def test_dry_run_writes_nothing(store: Store):
+    outcome = scanner(store, FakeSource([listing("1")]), dry_run=True).scan()
+    assert len(outcome.matches) == 1
+    assert store.get_listing("1") is None
+
+
+def test_counters_reflect_the_sweep(store: Store):
+    source = FakeSource([
+        listing("1", price_cents=3_800_000),
+        listing("2", title="WANTED Bobcat T770", price_cents=3_900_000),
+    ])
+    outcome = scanner(store, source).scan()
+    assert outcome.counters.found == 2
+    assert outcome.counters.new == 2
+    assert outcome.counters.prefiltered == 1
+    assert outcome.counters.extracted == 1
+    assert outcome.counters.matched == 1
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_pipeline_scan.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.pipeline'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/marketsearch/pipeline.py`:
+
+```python
+"""Orchestration: search, dedupe, prefilter, fetch, extract, record."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import asdict, dataclass, field
+from typing import Callable
+
+from marketsearch.config import Config, SearchConfig
+from marketsearch.extract import ExtractionError, Extractor
+from marketsearch.fingerprint import fingerprint
+from marketsearch.models import ListingDetail, RawListing
+from marketsearch.notify.render import MatchCard, download_photos
+from marketsearch.prefilter import prefilter
+from marketsearch.sources.base import ListingSource, ParseError, SourceError
+from marketsearch.store import ExtractionRow, ListingRow, Store, utcnow
+
+log = logging.getLogger(__name__)
+
+RELIST_WINDOW_DAYS = 60
+
+
+@dataclass
+class ScanCounters:
+    found: int = 0
+    new: int = 0
+    prefiltered: int = 0
+    extracted: int = 0
+    matched: int = 0
+    errors: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    matches: list[MatchCard] = field(default_factory=list)
+    unverified: list[MatchCard] = field(default_factory=list)
+    counters: ScanCounters = field(default_factory=ScanCounters)
+
+
+def content_hash(detail: ListingDetail) -> str:
+    payload = json.dumps(
+        {"d": detail.description, "p": detail.photo_urls}, sort_keys=True
+    ).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=16).hexdigest()
+
+
+def listing_row_from(
+    listing: RawListing, search_name: str, fp: str, stage: str
+) -> ListingRow:
+    """Build a ListingRow without a database read.
+
+    Used for card construction so that --dry-run, which writes nothing, still
+    produces exactly the same output as a real run.
+    """
+    now = utcnow()
+    return ListingRow(
+        listing_id=listing.listing_id, search_name=search_name, title=listing.title,
+        price_cents=listing.price_cents, location=listing.location, url=listing.url,
+        thumbnail_url=listing.thumbnail_url, seller_name=listing.seller_name,
+        fingerprint=fp, stage=stage, reject_reason=None, watched=False,
+        first_seen_at=now, last_seen_at=now, last_change_check_at=None,
+    )
+
+
+class Scanner:
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        source: ListingSource,
+        extractor: Extractor,
+        photo_fetcher: Callable[..., list[bytes]] = download_photos,
+        dry_run: bool = False,
+    ) -> None:
+        self._config = config
+        self._store = store
+        self._source = source
+        self._extractor = extractor
+        self._photo_fetcher = photo_fetcher
+        self._dry_run = dry_run
+
+    def scan(self) -> ScanOutcome:
+        matches: list[MatchCard] = []
+        unverified: list[MatchCard] = []
+        counters = ScanCounters()
+        budget = self._config.extraction.max_extractions_per_run
+
+        for search in self._config.searches:
+            listings = self._source.search(
+                search.query, self._config.location.anchor,
+                self._config.location.radius_miles,
+            )
+            counters.found += len(listings)
+
+            known = self._store.known_listing_ids([l.listing_id for l in listings])
+            fresh = [l for l in listings if l.listing_id not in known]
+            counters.new += len(fresh)
+            log.info(
+                "%s: %d listings, %d new", search.name, len(listings), len(fresh)
+            )
+
+            for listing in fresh:
+                budget -= self._process(
+                    listing, search, matches, unverified, counters,
+                    budget_remaining=budget,
+                )
+
+        return ScanOutcome(matches=matches, unverified=unverified, counters=counters)
+
+    def _set_stage(self, listing_id: str, stage: str, reason: str | None = None) -> None:
+        if not self._dry_run:
+            self._store.set_stage(listing_id, stage, reason)
+
+    def _process(
+        self,
+        listing: RawListing,
+        search: SearchConfig,
+        matches: list[MatchCard],
+        unverified: list[MatchCard],
+        counters: ScanCounters,
+        budget_remaining: int,
+    ) -> int:
+        """Handle one new listing. Returns the number of extractions consumed."""
+        fp = fingerprint(
+            listing.title, listing.price_cents, listing.seller_name, listing.location
+        )
+
+        if not self._dry_run:
+            self._store.upsert_listing(listing, search.name, fp)
+
+        decision = prefilter(listing, search)
+        if not decision.keep:
+            counters.prefiltered += 1
+            self._set_stage(listing.listing_id, "prefiltered_out", decision.reason)
+            return 0
+
+        if not self._dry_run and self._store.fingerprint_seen_before(
+            fp, listing.listing_id, RELIST_WINDOW_DAYS
+        ):
+            counters.prefiltered += 1
+            self._set_stage(
+                listing.listing_id, "prefiltered_out",
+                f"repost of a listing seen within {RELIST_WINDOW_DAYS} days",
+            )
+            return 0
+
+        if budget_remaining <= 0:
+            log.info("extraction budget spent; %s stays pending", listing.listing_id)
+            self._set_stage(listing.listing_id, "pending")
+            return 0
+
+        try:
+            detail = self._source.fetch_detail(listing.listing_id)
+        except (ParseError, SourceError) as exc:
+            log.warning("detail fetch failed for %s: %s", listing.listing_id, exc)
+            counters.errors += 1
+            self._set_stage(listing.listing_id, "pending")
+            return 0
+
+        if not self._dry_run:
+            self._store.save_detail(detail, content_hash(detail))
+
+        try:
+            result = self._extractor.extract(listing, detail, search.criteria)
+        except ExtractionError as exc:
+            log.warning("extraction failed for %s: %s", listing.listing_id, exc)
+            counters.errors += 1
+            self._set_stage(listing.listing_id, "pending")
+            return 0
+
+        counters.extracted += 1
+        extraction = result.extraction
+
+        if not self._dry_run:
+            self._store.save_extraction(
+                listing_id=listing.listing_id,
+                attributes=extraction.model_dump(
+                    include={"core", "specs", "condition", "deal"}
+                ),
+                verdict=extraction.verdict, confidence=extraction.confidence,
+                reasoning=extraction.reasoning, unknowns=extraction.unknowns,
+                model=self._config.extraction.model,
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                cost_cents=result.cost_cents,
+            )
+
+        stage = "matched" if extraction.verdict == "match" else "extracted"
+        self._set_stage(listing.listing_id, stage)
+
+        row = ExtractionRow(
+            listing_id=listing.listing_id,
+            attributes=extraction.model_dump(include={"core", "specs", "condition", "deal"}),
+            verdict=extraction.verdict, confidence=extraction.confidence,
+            reasoning=extraction.reasoning, unknowns=extraction.unknowns,
+            model=self._config.extraction.model, created_at=utcnow(),
+        )
+
+        if extraction.verdict == "match":
+            counters.matched += 1
+            matches.append(
+                MatchCard(
+                    listing=listing_row_from(listing, search.name, fp, stage),
+                    extraction=row,
+                    photos=self._photo_fetcher(detail.photo_urls),
+                )
+            )
+        elif extraction.verdict == "unverifiable" and search.on_unknown == "alert":
+            unverified.append(
+                MatchCard(
+                    listing=listing_row_from(listing, search.name, fp, stage),
+                    extraction=row,
+                    photos=self._photo_fetcher(detail.photo_urls),
+                )
+            )
+
+        return 1
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_pipeline_scan.py -v`
+Expected: 17 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/marketsearch/pipeline.py tests/test_pipeline_scan.py
+git commit -m "feat: scan pipeline with dedupe, prefilter, extraction budget"
+```
+
+---
+
+## Task 16: Watched-listing sync and change detection
+
+**Files:**
+- Modify: `src/marketsearch/sources/base.py` (add `ListingUnavailable`), `src/marketsearch/sources/parse.py` (add `detect_unavailable`), `src/marketsearch/sources/facebook.py` (raise it), `src/marketsearch/pipeline.py` (add `WatchSyncer`)
+- Test: `tests/test_pipeline_watched.py`
+
+**Interfaces:**
+- Consumes: everything from Task 15, plus `ChangeCard` (Task 12)
+- Produces:
+  - `ListingUnavailable(SourceError)` in `sources/base.py`
+  - `detect_unavailable(html: str) -> bool` in `sources/parse.py`
+  - `WatchOutcome` frozen dataclass: `.changes: list[ChangeCard]`, `.errors: int`
+  - `WatchSyncer(config, store, source, extractor, dry_run=False)` with `.sync() -> WatchOutcome`
+
+**How favourites work.** The user saves a listing using Facebook Marketplace's own Save feature. Each run reads the saved page; **Facebook's list is the source of truth and the database mirrors it**, so un-saving is the unfollow and there is no separate state to keep in sync. A saved listing the tool has never seen gets a full extraction on first sight, giving change alerts the same attribute table as everything else and a baseline to diff against.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_pipeline_watched.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.models import ListingDetail, RawListing
+from marketsearch.pipeline import WatchSyncer, content_hash
+from marketsearch.sources.base import ListingUnavailable, ParseError
+from marketsearch.store import Store
+
+from tests.test_pipeline_scan import CONFIG_DICT, FakeExtractor, config, extraction, listing
+
+
+class FakeWatchSource:
+    def __init__(self, saved=None, details=None, unavailable=None):
+        self.saved = saved or []
+        self.details = details or {}
+        self.unavailable = set(unavailable or [])
+        self.detail_calls: list[str] = []
+
+    def search(self, query, location, radius_miles):
+        return []
+
+    def fetch_saved(self):
+        return list(self.saved)
+
+    def fetch_detail(self, listing_id):
+        self.detail_calls.append(listing_id)
+        if listing_id in self.unavailable:
+            raise ListingUnavailable(f"{listing_id} is gone")
+        return self.details.get(
+            listing_id,
+            ListingDetail(listing_id=listing_id, description="2400 hours",
+                          structured_fields={}, photo_urls=[], distance_miles=None),
+        )
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Store:
+    s = Store(tmp_path / "w.db")
+    s.initialize()
+    yield s
+    s.close()
+
+
+def syncer(store, source, extractor=None, **kwargs) -> WatchSyncer:
+    return WatchSyncer(
+        config=config(), store=store, source=source,
+        extractor=extractor or FakeExtractor(), **kwargs,
+    )
+
+
+def seed(store: Store, listing_obj: RawListing, description="2400 hours") -> None:
+    store.upsert_listing(listing_obj, "bobcat-t770", "fp")
+    detail = ListingDetail(listing_id=listing_obj.listing_id, description=description,
+                           structured_fields={}, photo_urls=[], distance_miles=None)
+    store.save_detail(detail, content_hash(detail))
+
+
+def test_saved_ids_are_mirrored_into_the_database(store: Store):
+    seed(store, listing("1"))
+    syncer(store, FakeWatchSource(saved=[listing("1")])).sync()
+    assert store.watched_listing_ids() == {"1"}
+
+
+def test_unsaving_on_facebook_clears_the_watch_flag(store: Store):
+    seed(store, listing("1"))
+    syncer(store, FakeWatchSource(saved=[listing("1")])).sync()
+    syncer(store, FakeWatchSource(saved=[])).sync()
+    assert store.watched_listing_ids() == set()
+
+
+def test_a_never_seen_saved_listing_is_extracted_for_a_baseline(store: Store):
+    extractor = FakeExtractor()
+    outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor).sync()
+    assert extractor.calls == 1
+    assert store.get_listing("9") is not None
+    assert store.latest_extraction("9") is not None
+    assert outcome.changes == []  # first sight is not a change
+
+
+def test_no_change_produces_no_card(store: Store):
+    seed(store, listing("1"))
+    outcome = syncer(store, FakeWatchSource(saved=[listing("1")])).sync()
+    assert outcome.changes == []
+
+
+def test_price_drop_produces_a_change_card(store: Store):
+    seed(store, listing("1", price_cents=4_100_000))
+    source = FakeWatchSource(saved=[listing("1", price_cents=3_800_000)])
+    outcome = syncer(store, source).sync()
+    assert len(outcome.changes) == 1
+    change = outcome.changes[0]
+    assert change.kind == "price_change"
+    assert change.old_price_cents == 4_100_000
+    assert change.new_price_cents == 3_800_000
+
+
+def test_price_increase_also_produces_a_change_card(store: Store):
+    seed(store, listing("1", price_cents=3_800_000))
+    outcome = syncer(store, FakeWatchSource(saved=[listing("1", price_cents=4_000_000)])).sync()
+    assert outcome.changes[0].new_price_cents == 4_000_000
+
+
+def test_new_price_is_persisted(store: Store):
+    seed(store, listing("1", price_cents=4_100_000))
+    syncer(store, FakeWatchSource(saved=[listing("1", price_cents=3_800_000)])).sync()
+    assert store.get_listing("1").price_cents == 3_800_000
+
+
+def test_edited_description_produces_a_change_card(store: Store):
+    seed(store, listing("1"), description="2400 hours")
+    source = FakeWatchSource(
+        saved=[listing("1")],
+        details={"1": ListingDetail(listing_id="1", description="2400 hours. New tracks!",
+                                    structured_fields={}, photo_urls=[], distance_miles=None)},
+    )
+    outcome = syncer(store, source).sync()
+    assert len(outcome.changes) == 1
+    assert outcome.changes[0].kind == "description_change"
+
+
+def test_removed_listing_produces_a_removed_card(store: Store):
+    seed(store, listing("1"))
+    source = FakeWatchSource(saved=[listing("1")], unavailable={"1"})
+    outcome = syncer(store, source).sync()
+    assert len(outcome.changes) == 1
+    assert outcome.changes[0].kind == "removed"
+    assert outcome.changes[0].old_price_cents == 3_800_000
+
+
+def test_a_parse_error_is_an_error_not_a_removal(store: Store):
+    """Facebook changing its markup must never be reported as 'sold'."""
+    class Broken(FakeWatchSource):
+        def fetch_detail(self, listing_id):
+            raise ParseError("markup changed")
+
+    seed(store, listing("1"))
+    outcome = syncer(store, Broken(saved=[listing("1")])).sync()
+    assert outcome.changes == []
+    assert outcome.errors == 1
+
+
+def test_price_change_skips_the_detail_fetch_for_unchanged_text(store: Store):
+    """Both a price change and a description edit are reported from one fetch."""
+    seed(store, listing("1", price_cents=4_100_000))
+    source = FakeWatchSource(saved=[listing("1", price_cents=3_800_000)])
+    syncer(store, source).sync()
+    assert source.detail_calls == ["1"]
+
+
+def test_dry_run_writes_nothing(store: Store):
+    seed(store, listing("1", price_cents=4_100_000))
+    outcome = syncer(store, FakeWatchSource(saved=[listing("1", price_cents=3_800_000)]),
+                     dry_run=True).sync()
+    assert len(outcome.changes) == 1
+    assert store.get_listing("1").price_cents == 4_100_000
+    assert store.watched_listing_ids() == set()
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_pipeline_watched.py -v`
+Expected: FAIL with `ImportError: cannot import name 'ListingUnavailable'`
+
+- [ ] **Step 3: Add `ListingUnavailable` to `sources/base.py`**
+
+```python
+class ListingUnavailable(SourceError):
+    """The listing page loaded but the listing is gone — sold or withdrawn.
+
+    Deliberately distinct from ParseError. Reporting a markup change as
+    'likely sold' would be a confident lie about a machine still for sale.
+    """
+```
+
+- [ ] **Step 4: Add `detect_unavailable` to `sources/parse.py`**
+
+```python
+_UNAVAILABLE_MARKERS = (
+    "this listing isn't available",
+    "this listing is no longer available",
+    "content isn't available",
+    "sorry, this content isn't available",
+)
+
+
+def detect_unavailable(html: str) -> bool:
+    """True when Facebook says the listing is gone."""
+    lowered = html.lower()
+    return any(marker in lowered for marker in _UNAVAILABLE_MARKERS)
+```
+
+Add a fixture `tests/fixtures/pages/unavailable.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<div>Sorry, this content isn't available right now</div>
+</body></html>
+```
+
+And a test in `tests/test_parse.py`:
+
+```python
+def test_detect_unavailable(fixtures_dir: Path):
+    from marketsearch.sources.parse import detect_unavailable
+    assert detect_unavailable(page(fixtures_dir, "unavailable.html")) is True
+    assert detect_unavailable(page(fixtures_dir, "item.html")) is False
+```
+
+- [ ] **Step 5: Raise it from `FacebookSource.fetch_detail`**
+
+In `src/marketsearch/sources/facebook.py`, import `ListingUnavailable` and `detect_unavailable`, then change `fetch_detail`:
+
+```python
+    def fetch_detail(self, listing_id: str) -> ListingDetail:
+        html = self._load(build_item_url(listing_id), "item")
+        if detect_unavailable(html):
+            raise ListingUnavailable(f"listing {listing_id} is no longer available")
+        try:
+            return parse_item_detail(html, listing_id)
+        except ParseError:
+            self._save_debug(f"item-{listing_id}", html)
+            raise
+```
+
+- [ ] **Step 6: Add `WatchSyncer` to `pipeline.py`**
+
+Append to `src/marketsearch/pipeline.py` (and add `ChangeCard` and `ListingUnavailable` to the existing imports):
+
+```python
+@dataclass(frozen=True)
+class WatchOutcome:
+    changes: list[ChangeCard] = field(default_factory=list)
+    errors: int = 0
+
+
+class WatchSyncer:
+    """Mirror Facebook's saved list and report what changed.
+
+    Facebook's saved list is the source of truth; the database mirrors it. That
+    is what makes un-saving the unfollow, with no separate state to reconcile.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        source: ListingSource,
+        extractor: Extractor,
+        dry_run: bool = False,
+    ) -> None:
+        self._config = config
+        self._store = store
+        self._source = source
+        self._extractor = extractor
+        self._dry_run = dry_run
+
+    def _search_for(self, title: str) -> SearchConfig:
+        """Pick the search whose title filters this listing satisfies.
+
+        A machine saved while browsing may not belong to any configured search;
+        the first search's criteria are a reasonable default and the alert
+        still carries the full attribute table.
+        """
+        lowered = title.lower()
+        for search in self._config.searches:
+            if search.title_must_match and all(t in lowered for t in search.title_must_match):
+                return search
+        return self._config.searches[0]
+
+    def sync(self) -> WatchOutcome:
+        saved = self._source.fetch_saved()
+        log.info("%d saved listing(s) on facebook", len(saved))
+
+        changes: list[ChangeCard] = []
+        errors = 0
+
+        for listing in saved:
+            try:
+                change = self._check(listing)
+            except (ParseError, SourceError) as exc:
+                log.warning("watched check failed for %s: %s", listing.listing_id, exc)
+                errors += 1
+                continue
+            if change is not None:
+                changes.append(change)
+
+        if not self._dry_run:
+            self._store.set_watched_ids({l.listing_id for l in saved})
+
+        return WatchOutcome(changes=changes, errors=errors)
+
+    def _check(self, listing: RawListing) -> ChangeCard | None:
+        known = self._store.get_listing(listing.listing_id)
+
+        if known is None:
+            self._baseline(listing)
+            return None
+
+        try:
+            detail = self._source.fetch_detail(listing.listing_id)
+        except ListingUnavailable:
+            return ChangeCard(
+                listing=known, kind="removed",
+                old_price_cents=known.price_cents, new_price_cents=None,
+            )
+
+        if known.price_cents != listing.price_cents:
+            if not self._dry_run:
+                self._store.update_price(listing.listing_id, listing.price_cents)
+                self._store.save_detail(detail, content_hash(detail))
+            return ChangeCard(
+                listing=known, kind="price_change",
+                old_price_cents=known.price_cents, new_price_cents=listing.price_cents,
+            )
+
+        new_hash = content_hash(detail)
+        if new_hash != self._store.get_detail_content_hash(listing.listing_id):
+            if not self._dry_run:
+                self._store.save_detail(detail, new_hash)
+            return ChangeCard(
+                listing=known, kind="description_change",
+                old_price_cents=known.price_cents, new_price_cents=listing.price_cents,
+            )
+
+        return None
+
+    def _baseline(self, listing: RawListing) -> None:
+        """First sight of a listing saved while browsing. Establish a record so
+        later runs have something to diff against."""
+        search = self._search_for(listing.title)
+        fp = fingerprint(
+            listing.title, listing.price_cents, listing.seller_name, listing.location
+        )
+        if not self._dry_run:
+            self._store.upsert_listing(listing, search.name, fp)
+
+        detail = self._source.fetch_detail(listing.listing_id)
+        if not self._dry_run:
+            self._store.save_detail(detail, content_hash(detail))
+
+        try:
+            result = self._extractor.extract(listing, detail, search.criteria)
+        except ExtractionError as exc:
+            log.warning("baseline extraction failed for %s: %s", listing.listing_id, exc)
+            return
+
+        if not self._dry_run:
+            extraction = result.extraction
+            self._store.save_extraction(
+                listing_id=listing.listing_id,
+                attributes=extraction.model_dump(
+                    include={"core", "specs", "condition", "deal"}
+                ),
+                verdict=extraction.verdict, confidence=extraction.confidence,
+                reasoning=extraction.reasoning, unknowns=extraction.unknowns,
+                model=self._config.extraction.model,
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                cost_cents=result.cost_cents,
+            )
+            self._store.set_stage(listing.listing_id, "extracted")
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `pytest tests/test_pipeline_watched.py tests/test_parse.py tests/test_facebook_source.py -v`
+Expected: all pass (13 watched + 18 parse + 13 source)
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/marketsearch/pipeline.py src/marketsearch/sources tests/test_pipeline_watched.py \
+        tests/test_parse.py tests/fixtures/pages/unavailable.html
+git commit -m "feat: watched listing sync from facebook saved items with change detection"
 ```
