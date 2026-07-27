@@ -160,29 +160,37 @@ def build(db_path: Path, config_path: Path) -> str:
     out += ["---", "", "## Near-miss check", "", ""]
     any_near = False
     for name, search in searches.items():
-        for token in search.title_must_match:
-            digits = "".join(ch for ch in token if ch.isdigit())
-            if not digits:
-                continue
-            rows = conn.execute(
-                "select title,price_cents,reject_reason from listings "
-                "where search_name=? and stage='prefiltered_out'",
-                (name,),
-            ).fetchall()
-            near = [r for r in rows if digits in (r["title"] or "").lower()]
-            if near:
-                any_near = True
-                out += [
-                    f"**`{name}`: {len(near)} dropped listing(s) mention `{digits}` "
-                    f"but failed `{token}`** — the filter may be too strict:",
-                    "",
-                ]
-                for r in near:
-                    out.append(
-                        f"- {money(r['price_cents'])} — {r['title']} "
-                        f"_({r['reject_reason']})_"
-                    )
-                out.append("")
+        numbers = sorted({
+            digits for token in search.title_must_match
+            if (digits := "".join(ch for ch in token if ch.isdigit()))
+        })
+        if not numbers:
+            continue
+        rows = conn.execute(
+            "select title,price_cents,reject_reason from listings "
+            "where search_name=? and stage='prefiltered_out'",
+            (name,),
+        ).fetchall()
+        # One entry per listing, not per token — the same machine matching six
+        # spellings of one model number is one near-miss, not six.
+        near = [
+            r for r in rows
+            if any(d in (r["title"] or "").lower() for d in numbers)
+        ]
+        if near:
+            any_near = True
+            out += [
+                f"**`{name}`: {len(near)} dropped listing(s) mention "
+                f"{' or '.join(f'`{d}`' for d in numbers)} but matched none of "
+                f"`{list(search.title_must_match)}`** — the filter may be too strict:",
+                "",
+            ]
+            for r in near:
+                out.append(
+                    f"- {money(r['price_cents'])} — {r['title']} "
+                    f"_({r['reject_reason']})_"
+                )
+            out.append("")
     if not any_near:
         out += [
             "No dropped listing contained the model number from `title_must_match`, so",

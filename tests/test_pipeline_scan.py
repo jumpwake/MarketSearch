@@ -279,3 +279,19 @@ def test_counters_reflect_the_sweep(store: Store):
     assert outcome.counters.prefiltered == 1
     assert outcome.counters.extracted == 1
     assert outcome.counters.matched == 1
+
+
+def test_alerted_counter_separates_a_silent_run_from_an_unverifiable_one(store: Store):
+    """`0 matched` alone cannot tell a run with nothing to say from a run whose
+    every find was unverifiable — and unverifiable is the common case."""
+    extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor).scan()
+    assert outcome.counters.matched == 0
+    assert outcome.counters.alerted == 1
+
+
+def test_alerted_counter_ignores_unverifiable_listings_the_search_skips(store: Store):
+    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
+    outcome = scanner(store, FakeSource([listing("1")]), extractor, cfg=cfg).scan()
+    assert outcome.counters.alerted == 0

@@ -42,6 +42,9 @@ class ScanCounters:
     prefiltered: int = 0
     extracted: int = 0
     matched: int = 0
+    # Unverifiable listings a search still wants to hear about. Counted apart
+    # from `matched` so a run that alerted is never reported as a silent one.
+    alerted: int = 0
     errors: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -243,6 +246,7 @@ class Scanner:
                 )
             )
         elif extraction.verdict == "unverifiable" and search.on_unknown == "alert":
+            counters.alerted += 1
             unverified.append(
                 MatchCard(
                     listing=listing_row_from(listing, search.name, fp, stage),
@@ -290,7 +294,7 @@ class WatchSyncer:
         """
         lowered = title.lower()
         for search in self._config.searches:
-            if search.title_must_match and all(t in lowered for t in search.title_must_match):
+            if search.title_must_match and any(t in lowered for t in search.title_must_match):
                 return search
         return self._config.searches[0]
 
@@ -473,8 +477,10 @@ def run_once(
         store.finish_run(run_id, counters.as_dict())
 
     log.info(
-        "run complete: %d found, %d new, %d matched, %d change(s), %d error(s)",
-        counters.found, counters.new, counters.matched, len(watch.changes), counters.errors,
+        "run complete: %d found, %d new, %d matched, %d alerted, %d change(s), "
+        "%d error(s)",
+        counters.found, counters.new, counters.matched, counters.alerted,
+        len(watch.changes), counters.errors,
     )
     return RunReport(
         counters=counters, changes=len(watch.changes),

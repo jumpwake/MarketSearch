@@ -157,3 +157,20 @@ def test_dry_run_writes_nothing(store: Store):
     assert len(outcome.changes) == 1
     assert store.get_listing("1").price_cents == 4_100_000
     assert store.watched_listing_ids() == set()
+
+
+def test_saved_listing_routes_to_the_search_matching_any_of_its_variants(store: Store):
+    """A machine saved while browsing must be judged against its own search's
+    criteria. Requiring every spelling variant sends it to searches[0] instead."""
+    t870 = {
+        "name": "bobcat-t870", "query": "Bobcat T870",
+        "price_min_cents": 2_000_000, "price_max_cents": 5_500_000,
+        "title_must_match": ["t870", "t-870", "t 870"], "title_must_not_match": [],
+        "on_unknown": "alert", "criteria": "Under 3500 engine hours.",
+    }
+    cfg = config(searches=[CONFIG_DICT["searches"][0], t870])
+    source = FakeWatchSource(saved=[listing("9", title="2020 Bobcat T-870 track loader")])
+
+    WatchSyncer(config=cfg, store=store, source=source, extractor=FakeExtractor()).sync()
+
+    assert store.get_listing("9").search_name == "bobcat-t870"

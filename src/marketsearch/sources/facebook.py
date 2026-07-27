@@ -46,6 +46,12 @@ _MAX_PAGE_DELAY_S = 8.0
 
 _PAGE_TIMEOUT_MS = 45_000
 
+# Scrolling past the first screenful of search results.
+_MAX_SCROLLS = 15
+_SCROLL_PX = 4000
+_SCROLL_SETTLE_MS = 1200
+_DEFAULT_TARGET_LISTINGS = 100
+
 
 def build_search_url(query: str, radius_miles: int) -> str:
     params = {
@@ -60,6 +66,36 @@ def build_item_url(listing_id: str) -> str:
     return f"{ITEM_BASE}/{listing_id}/"
 
 
+def scroll_for_more(
+    page,
+    initial_count: int,
+    target: int,
+    count: Callable[[str], int],
+    max_scrolls: int = _MAX_SCROLLS,
+) -> list[str]:
+    """Scroll a loaded search page, returning one HTML snapshot per scroll.
+
+    Marketplace ships roughly 24 cards per screenful and appends the rest as you
+    scroll, so a single page load sees only the first page of results. Stops as
+    soon as the count reaches `target` or a scroll adds nothing — an exhausted
+    result set and a failed load look the same from here, and both mean stop.
+    """
+    snapshots: list[str] = []
+    seen = initial_count
+    for _ in range(max_scrolls):
+        if seen >= target:
+            break
+        page.mouse.wheel(0, _SCROLL_PX)
+        page.wait_for_timeout(_SCROLL_SETTLE_MS)
+        html = page.content()
+        snapshots.append(html)
+        found = count(html)
+        if found <= seen:
+            break
+        seen = found
+    return snapshots
+
+
 class FacebookSource:
     def __init__(
         self,
@@ -67,10 +103,12 @@ class FacebookSource:
         headless: bool = True,
         debug_dir: Path | None = None,
         fetch_html: Callable[[str], str] | None = None,
+        max_listings_per_search: int = _DEFAULT_TARGET_LISTINGS,
     ) -> None:
         self.profile_dir = Path(profile_dir)
         self.headless = headless
         self.debug_dir = Path(debug_dir) if debug_dir else None
+        self.max_listings_per_search = max_listings_per_search
         self._fetch_html_override = fetch_html
         self._playwright = None
         self._context = None
@@ -160,10 +198,27 @@ class FacebookSource:
         log.info("searching %r (location %s, %d mi)", query, location, radius_miles)
         html = self._load(url, "search")
         try:
-            return parse_search_results(html)
+            found = parse_search_results(html)
         except ParseError:
             self._save_debug("search", html)
             raise
+
+        if self._page is None:
+            return found
+
+        merged = {l.listing_id: l for l in found}
+        snapshots = scroll_for_more(
+            self._page,
+            initial_count=len(merged),
+            target=self.max_listings_per_search,
+            count=lambda h: len(parse_search_results(h)),
+        )
+        for snapshot in snapshots:
+            for listing in parse_search_results(snapshot):
+                merged.setdefault(listing.listing_id, listing)
+
+        log.info("%r: %d listing(s) after %d scroll(s)", query, len(merged), len(snapshots))
+        return list(merged.values())
 
     def fetch_detail(self, listing_id: str) -> ListingDetail:
         html = self._load(build_item_url(listing_id), "item")

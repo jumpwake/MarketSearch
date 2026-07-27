@@ -96,10 +96,58 @@ def test_empty_matcher_lists_keep_everything():
     assert result.keep is True
 
 
-def test_all_required_tokens_must_be_present():
+def test_any_required_token_is_enough():
+    """The tokens are spelling variants of one model, not conditions to meet
+    together. No title ever contains 't770' and 't-770' and 't 770' at once."""
     result = prefilter(
-        listing(title="Bobcat T770"),
-        search(title_must_match=["t770", "cab"]),
+        listing(title="Bobcat T-770 compact track loader"),
+        search(title_must_match=["t770", "t-770", "t 770"]),
+    )
+    assert result.keep is True
+    assert result.reason is None
+
+
+def test_drops_a_title_matching_none_of_the_required_tokens():
+    result = prefilter(
+        listing(title="2019 Bobcat T650"),
+        search(title_must_match=["t770", "t-770", "t 770"]),
     )
     assert result.keep is False
-    assert "cab" in result.reason
+    assert "t-770" in result.reason
+
+
+def test_exclusion_terms_match_whole_words_only():
+    """'toy' excludes toys, not Toyotas. Substring exclusions silently discard
+    real machines and the drop reason looks legitimate."""
+    result = prefilter(
+        listing(title="2015 Toyota 8FGU25 Bobcat T770"),
+        search(title_must_not_match=["toy"]),
+    )
+    assert result.keep is True
+
+
+def test_exclusion_terms_still_match_across_a_space():
+    result = prefilter(
+        listing(title="BOBCAT T770 TRACK LOADER FOR RENT"),
+        search(title_must_not_match=["for rent"]),
+    )
+    assert result.keep is False
+    assert "for rent" in result.reason
+
+
+def test_exclusion_terms_match_at_a_punctuation_boundary():
+    result = prefilter(
+        listing(title="Bobcat T770 - parts only, no engine"),
+        search(title_must_not_match=["parts only"]),
+    )
+    assert result.keep is False
+
+
+def test_required_terms_still_match_inside_a_longer_model_number():
+    """Guard: word boundaries must NOT reach title_must_match. '299d' has to
+    keep matching '299d3xe', which is how Marketplace sellers write it."""
+    result = prefilter(
+        listing(title="2021 Cat 299d3xe", price_cents=4_690_000),
+        search(title_must_match=["299d"], price_max_cents=5_000_000),
+    )
+    assert result.keep is True

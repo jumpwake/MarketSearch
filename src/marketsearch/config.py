@@ -38,6 +38,9 @@ class ExtractionConfig(BaseModel):
     model: str = "claude-opus-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     max_extractions_per_run: int = Field(default=25, ge=1)
+    # How deep to scroll a search page. Facebook's first screenful is ~24 cards,
+    # and Marketplace's fuzzy matching buries real hits below it.
+    max_listings_per_search: int = Field(default=100, ge=1)
 
 
 class EmailConfig(BaseModel):

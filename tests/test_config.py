@@ -97,3 +97,18 @@ def test_missing_file_raises_config_error(tmp_path: Path):
 def test_invalid_shape_raises_config_error(tmp_path: Path):
     with pytest.raises(ConfigError, match="radius_miles"):
         load_config(write(tmp_path, MINIMAL.replace("radius_miles: 250", "radius_miles: many")))
+
+
+def test_max_listings_per_search_defaults_to_more_than_one_page(tmp_path: Path):
+    """Facebook ships ~24 cards per screenful; the default must reach past it."""
+    cfg = load_config(write(tmp_path, MINIMAL))
+    assert cfg.extraction.max_listings_per_search >= 100
+
+
+def test_max_listings_per_search_is_configurable(tmp_path: Path):
+    body = MINIMAL + """
+extraction:
+  max_listings_per_search: 60
+"""
+    cfg = load_config(write(tmp_path, body))
+    assert cfg.extraction.max_listings_per_search == 60

@@ -119,7 +119,8 @@ def run(
             with Store(db) as store:
                 store.initialize()
                 with FacebookSource(
-                    cfg.account.profile_dir, headless=True, debug_dir=DEFAULT_DEBUG
+                    cfg.account.profile_dir, headless=True, debug_dir=DEFAULT_DEBUG,
+                    max_listings_per_search=cfg.extraction.max_listings_per_search,
                 ) as source:
                     report = run_once(
                         config=cfg,
@@ -144,7 +145,8 @@ def run(
 
     typer.echo(
         f"{report.counters.found} found, {report.counters.new} new, "
-        f"{report.counters.matched} matched, {report.changes} change(s), "
+        f"{report.counters.matched} matched, {report.counters.alerted} alerted, "
+        f"{report.changes} change(s), "
         f"{report.counters.errors} error(s)"
         + ("  [dry run — nothing written or sent]" if dry_run else "")
     )
@@ -175,7 +177,8 @@ def test_search(
     cfg = _load(config)
 
     with FacebookSource(
-        cfg.account.profile_dir, headless=False, debug_dir=DEFAULT_DEBUG
+        cfg.account.profile_dir, headless=False, debug_dir=DEFAULT_DEBUG,
+        max_listings_per_search=cfg.extraction.max_listings_per_search,
     ) as source:
         listings = source.search(
             query, cfg.location.anchor, cfg.location.radius_miles
