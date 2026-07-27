@@ -13,6 +13,7 @@ from marketsearch.config import Config, ConfigError, load_config
 from marketsearch.extract import Extractor
 from marketsearch.logging_setup import setup_logging
 from marketsearch.notify.delivery import (
+    DeliveryError,
     Dispatcher,
     EmailSender,
     SmsSender,
@@ -53,7 +54,22 @@ def build_extractor(config: Config) -> Extractor:
     )
 
 
+class _Unconfigured:
+    """Stands in for a sender while notifications are off. Dispatcher never calls
+    it in that state; if it ever does, fail loudly rather than send with no
+    credentials."""
+
+    def send(self, _: object) -> None:
+        raise DeliveryError("notifications are disabled — no sender is configured")
+
+
 def build_dispatcher(config: Config, store: Store) -> Dispatcher:
+    # Secrets are resolved only when notifications are on. The whole point of the
+    # shakedown is to run for days with `enabled: false`, which must not require
+    # an SMTP password or Twilio credentials for messages that are never sent.
+    if not config.notifications.enabled:
+        return Dispatcher(store, _Unconfigured(), _Unconfigured(), enabled=False)
+
     email = EmailSender(
         config.notifications.email,
         resolve_secret(config.notifications.email.password_env),
@@ -63,7 +79,7 @@ def build_dispatcher(config: Config, store: Store) -> Dispatcher:
         resolve_secret(config.notifications.sms.account_sid_env),
         resolve_secret(config.notifications.sms.auth_token_env),
     )
-    return Dispatcher(store, email, sms, enabled=config.notifications.enabled)
+    return Dispatcher(store, email, sms, enabled=True)
 
 
 def build_operational_notifier(config: Config) -> Callable[[str, str], None]:
