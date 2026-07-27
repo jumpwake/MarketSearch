@@ -1,98 +1,97 @@
 # MarketSearch — Handoff
 
-**Paused:** 2026-07-26
-**Branch:** `feat/marketsearch` (implementation) — branched from `main` at `dbebe6a`
-**Reason:** moving the work to a different machine.
+**Updated:** 2026-07-27
+**Branch:** `main` at `a913650`
+**State:** implementation complete; shakedown not started.
 
 ## Where things stand
 
 | Stage | Status |
 |---|---|
-| Design spec | ✅ Complete and approved — `docs/superpowers/specs/2026-07-26-marketsearch-design.md` |
-| Implementation plan | ✅ Complete, self-reviewed — `docs/superpowers/plans/2026-07-26-marketsearch.md` (20 tasks) |
-| Task 1 — scaffolding and models | ⚠️ **Code written and passing, but never reviewed** (see below) |
-| Tasks 2–20 | ⬜ Not started |
+| Design spec | ✅ `docs/superpowers/specs/2026-07-26-marketsearch-design.md` |
+| Implementation plan | ✅ `docs/superpowers/plans/2026-07-26-marketsearch.md` (20 tasks) |
+| Tasks 1–20 | ✅ All implemented and committed, one commit per task (`755c6a9`..`07f0669`) |
+| Local environment | ✅ Set up on this machine (see below) |
+| Verification checklist | ◐ 5 of 8 confirmed |
+| README shakedown | ⬜ Not started — blocked on Facebook login |
 
-### Task 1 is committed but NOT reviewed
+## Environment on this machine
 
-Task 1 was dispatched to a subagent which created all seven files and then was
-interrupted before it installed dependencies, ran the tests, committed, or
-wrote its report. On pause, the controller:
+`C:\Users\bowde\source\repos\MarketSearch`, Python 3.13.5.
 
-- verified the files match the task brief exactly (`models.py`, `.gitignore`,
-  `pyproject.toml`, `.env.example`, `__init__.py`, `conftest.py`,
-  `test_models.py`)
-- installed `pytest` and `pydantic` only, and ran the suite: **3 passed**
-- committed the work so it would survive the move
-
-**What has NOT happened for Task 1:** the full `pip install -e ".[dev]"`, the
-implementer's self-review, the SDD task review (spec compliance + quality), and
-the ledger completion entry. **Treat Task 1 as needing its review before Task 2
-starts.**
-
-## Resuming on the new machine
-
-```bash
-git clone https://github.com/jumpwake/MarketSearch.git
-cd MarketSearch
-git checkout feat/marketsearch
-
-python -m venv .venv                       # Python 3.12+ required
-.venv/Scripts/python.exe -m pip install -e ".[dev]"     # Windows
-# source .venv/bin/activate && pip install -e ".[dev]"  # macOS/Linux
-
-.venv/Scripts/python.exe -m pytest         # expect 3 passed
+```powershell
+.\.venv\Scripts\python.exe -m pytest      # 219 passed, 4 skipped, 6 deselected
 ```
 
-Then tell Claude:
+Playwright Chromium 149.0.7827.55 is installed and verified launching.
 
-> Resume executing `docs/superpowers/plans/2026-07-26-marketsearch.md` with
-> subagent-driven development. Task 1's code is committed but was never
-> reviewed — start by reviewing it, then continue from Task 2.
+**The 4 skips are the thing to watch.** All are in `tests/test_parse.py:138` and skip
+because `real_search.html`, `real_item.html`, and `real_saved.html` have never been
+captured. The parser has only ever been tested against invented fixtures. Those three
+files are what tell you whether `src/marketsearch/sources/parse.py` survives contact
+with real Facebook markup — **expect it to need fixing** once they exist. The 6
+deselected are the `live_api` / `live_fb` marked tests.
 
-## Decisions made during setup that are NOT in the plan
+## Verification checklist status
 
-The SDD ledger lives in `.superpowers/` which is git-ignored and does **not**
-travel. These are the decisions it held:
+Confirmed:
 
-1. **Workspace.** Implementation happens in an isolated git worktree on
-   `feat/marketsearch`, created from local `HEAD` rather than `origin/main`
-   (the remote had no branches at the time). On the new machine a plain
-   checkout of the branch is fine — the worktree was machine-local.
+- ✅ `pytest` passes with no network access
+- ✅ `marketsearch --help` lists `run`, `login`, `test-search`, `history`, `preview`, `replay`
+- ✅ Notifications ship disabled (`notifications.enabled: false`)
+- ✅ A parse failure writes to `debug/` — `tests/test_facebook_source.py:80`
+- ✅ No stale lock survives a killed run — `tests/test_runstate.py:42-62`
 
-2. **Pre-flight conflict resolution — `store._conn`.** The plan mandates
-   reaching into the private `Store._conn` attribute from *production* code in
-   two places: Task 18's `cli.py history` and Task 19's
-   `shakedown.collect_run_cards`. A code-quality reviewer will flag this every
-   time. **Resolution: those two tasks should add public
-   `Store.recent_runs(limit) -> list[sqlite3.Row]` and
-   `Store.get_run(run_id) -> sqlite3.Row | None` methods and call those
-   instead.** Test code may keep using `_conn` — that is normal test practice.
-   Apply this when Tasks 18 and 19 are dispatched.
+Outstanding:
 
-3. **`.gitignore` portability.** `.claude/worktrees/`, `.superpowers/`, and
-   `.claude/settings.local.json` were added to the committed `.gitignore`
-   beyond what Task 1's brief specifies, because `.git/info/exclude` does not
-   survive a clone. If a later task rewrites `.gitignore`, **merge rather than
-   overwrite** — do not drop these three lines.
+- ⬜ `marketsearch run --dry-run` leaves the database unchanged (needs a live sweep)
+- ⬜ `git log -p` contains no secrets (worth an explicit pass before any push)
+- ⬜ `pytest -m live_api` passes — **costs ~15 cents**, needs `ANTHROPIC_API_KEY`
 
-## Known gotchas ahead
+## What's next, in dependency order
 
-- **Task 9** (`pytest -m live_api`) costs real money — roughly 15 cents per
-  run against the Anthropic API. Needs `ANTHROPIC_API_KEY`.
-- **Task 11** requires `playwright install chromium`, a real Facebook login,
-  and a manual page-capture step. Its synthetic HTML fixtures are structurally
-  faithful but invented — **expect the parser to need fixing** when real
-  captures replace them. That step is designed to make the discovery cheap.
-- **Task 15** adds an `extraction_attempts` column to `listings` and a fifth
-  `stage` value, `"failed"`. Every existing `ListingRow(...)` construction in
-  the tests must gain `extraction_attempts=0` at that point — the task's
-  Step 3 says so explicitly.
-- The remote `origin` was empty when this was pushed; `main` and
-  `feat/marketsearch` are the first two branches on it.
+1. Fill in real values in `config.yaml` and `.env` — anchor city, radius, searches,
+   Anthropic key, SMTP app password. (Currently all placeholders.)
+2. `marketsearch login` — opens a browser; log into Facebook and set Marketplace
+   location and radius **by hand**. Facebook derives Marketplace location from the
+   profile, so this is the only way the tool knows where to look. Creates
+   `chrome-profile/`; its absence means this step has not run.
+3. `python scripts/capture_pages.py` — un-skips the three real-page parser tests.
+4. `pytest` — fix `parse.py` against whatever the real captures reveal.
+5. Then the README shakedown, steps 1–6, ending with `notifications.enabled: true`.
 
-## Costs to expect once running
+## Configuration notes
 
-Roughly 2¢ per listing examined at the default `claude-opus-5` / `effort: low`,
-plus about a penny per SMS. Switching `extraction.model` to `claude-haiku-4-5`
-drops it to about a third of a cent per listing.
+**The example files are gone, deliberately.** `config.example.yaml` and `.env.example`
+were converted into `config.yaml` and `.env` rather than copied (commit-pending
+deletions). The README's `copy config.example.yaml config.yaml` line no longer matches
+reality and should be updated if the repo is ever shared.
+
+**`config.yaml` is not gitignored.** Only `.env` is. Actual secrets live in `.env` and
+`config.yaml` holds only the *names* of the env vars (`password_env`,
+`account_sid_env`), so nothing sensitive is exposed today — but `config.yaml` does hold
+the anchor city, destination email, and phone numbers, and a `git add -A` would commit
+them. Add it to `.gitignore` if that matters.
+
+**Twilio is optional in practice.** The SMS is only a nudge; `notify/delivery.py:176`
+catches its failure so a dead Twilio account cannot cost you the email. The `sms:`
+block must still *exist* in `config.yaml` (`config.py:65` requires it) — placeholder
+values are fine. A carrier email-to-SMS gateway address in the email recipients is a
+zero-cost substitute.
+
+## Costs once running
+
+Roughly 2¢ per listing examined at the default `claude-opus-5` / `effort: low`, plus
+about a penny per SMS. Switching `extraction.model` to `claude-haiku-4-5` drops it to
+about a third of a cent per listing.
+
+## Resolved — no longer live concerns
+
+These were carried in the previous handoff and are now closed:
+
+- **`store._conn` leakage.** Tasks 18 and 19 use the public `Store.recent_runs()` and
+  `Store.get_run()` instead of the private attribute, as planned (see `846dc69`).
+- **`.gitignore` portability.** The three tooling entries survived every later task.
+- **Task 15's `extraction_attempts` column.** Landed with the tests updated.
+- **Task 1's missing review.** Task 1 was reviewed and all 19 downstream tasks built
+  on it cleanly.
