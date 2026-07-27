@@ -455,6 +455,60 @@ class Store:
         cur = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,))
         return cur.fetchone()
 
+    def latest_run_id(self) -> int | None:
+        cur = self._conn.execute("SELECT run_id FROM runs ORDER BY run_id DESC LIMIT 1")
+        row = cur.fetchone()
+        return int(row["run_id"]) if row else None
+
+    def extractions_between(
+        self, start: str, end: str
+    ) -> list[tuple[ListingRow, ExtractionRow]]:
+        """Every extraction produced inside a run's window, newest first."""
+        cur = self._conn.execute(
+            """
+            SELECT e.id AS extraction_id, l.listing_id AS lid
+            FROM extractions e JOIN listings l ON l.listing_id = e.listing_id
+            WHERE e.created_at >= ? AND e.created_at <= ?
+            ORDER BY e.id DESC
+            """,
+            (start, end),
+        )
+        out: list[tuple[ListingRow, ExtractionRow]] = []
+        seen: set[str] = set()
+        for row in cur.fetchall():
+            listing_id = row["lid"]
+            if listing_id in seen:
+                continue
+            seen.add(listing_id)
+            listing = self.get_listing(listing_id)
+            extraction = self.latest_extraction(listing_id)
+            if listing is not None and extraction is not None:
+                out.append((listing, extraction))
+        return out
+
+    def listings_with_details(
+        self, search_name: str | None, since: str
+    ) -> list[tuple[ListingRow, ListingDetail, ExtractionRow | None]]:
+        """Stored listings that have a saved detail — the replay corpus."""
+        sql = (
+            "SELECT l.listing_id AS lid FROM listings l"
+            " JOIN listing_details d ON d.listing_id = l.listing_id"
+            " WHERE l.first_seen_at >= ?"
+        )
+        params: list[object] = [since]
+        if search_name is not None:
+            sql += " AND l.search_name = ?"
+            params.append(search_name)
+        sql += " ORDER BY l.first_seen_at DESC"
+
+        out = []
+        for row in self._conn.execute(sql, params).fetchall():
+            listing = self.get_listing(row["lid"])
+            detail = self.get_detail(row["lid"])
+            if listing is not None and detail is not None:
+                out.append((listing, detail, self.latest_extraction(row["lid"])))
+        return out
+
     # ---- key/value state -------------------------------------------------
 
     def get_state(self, key: str) -> str | None:

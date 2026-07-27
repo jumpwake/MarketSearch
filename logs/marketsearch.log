@@ -86,3 +86,91 @@
 2026-07-26 21:49:59,145 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
 2026-07-26 21:49:59,164 INFO    marketsearch.pipeline: run complete: 0 found, 0 new, 1 matched, 1 change(s), 0 error(s)
 2026-07-26 21:49:59,225 WARNING marketsearch.runstate: reclaiming stale lock at C:\Users\kevin\AppData\Local\Temp\pytest-of-kevin\pytest-25\test_stale_lock_is_reclaimed0\run.lock
+2026-07-26 21:51:39,884 INFO    marketsearch.notify.delivery: sent email: MarketSearch: 1 new match
+2026-07-26 21:51:39,909 INFO    marketsearch.notify.delivery: sent sms: MarketSearch: 1 new match — check email.
+2026-07-26 21:51:39,963 INFO    marketsearch.notify.delivery: notifications disabled — would have sent 1 match(es), 0 unverified, 0 change(s)
+2026-07-26 21:51:40,159 WARNING marketsearch.notify.delivery: sms nudge failed (email was delivered): twilio down
+2026-07-26 21:51:40,266 INFO    marketsearch.sources.facebook: searching 'Bobcat T770' (location Olathe, KS, 250 mi)
+2026-07-26 21:51:40,278 INFO    marketsearch.sources.facebook: searching 'Bobcat T999' (location x, 250 mi)
+2026-07-26 21:51:40,284 INFO    marketsearch.sources.facebook: searching 'x' (location y, 1 mi)
+2026-07-26 21:51:40,292 INFO    marketsearch.sources.facebook: searching 'x' (location y, 1 mi)
+2026-07-26 21:51:40,302 INFO    marketsearch.sources.facebook: searching 'x' (location y, 1 mi)
+2026-07-26 21:51:40,304 WARNING marketsearch.sources.facebook: saved unparseable page to C:\Users\kevin\AppData\Local\Temp\pytest-of-kevin\pytest-27\test_parse_failure_writes_the_0\debug\20260727T025140-search.html
+2026-07-26 21:51:40,396 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,443 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,462 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,475 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 0 awaiting retry
+2026-07-26 21:51:40,506 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,522 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,567 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,573 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,600 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,600 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,634 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,664 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,702 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,733 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,737 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,766 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,770 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,772 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:40,806 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,808 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,812 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:40,814 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,818 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:40,820 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,824 WARNING marketsearch.pipeline: giving up on 1 after 3 attempts (extraction failed)
+2026-07-26 21:51:40,838 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,853 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,853 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:40,853 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,853 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:40,866 WARNING marketsearch.pipeline: extraction failed for 1: api down
+2026-07-26 21:51:40,870 WARNING marketsearch.pipeline: giving up on 1 after 3 attempts (extraction failed)
+2026-07-26 21:51:40,874 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 0 new, 0 awaiting retry
+2026-07-26 21:51:40,901 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:40,907 WARNING marketsearch.pipeline: detail fetch failed for 1: markup changed
+2026-07-26 21:51:40,980 INFO    marketsearch.pipeline: bobcat-t770: 5 listings, 5 new, 0 awaiting retry
+2026-07-26 21:51:40,996 INFO    marketsearch.pipeline: extraction budget spent; 2 stays pending
+2026-07-26 21:51:40,996 INFO    marketsearch.pipeline: extraction budget spent; 3 stays pending
+2026-07-26 21:51:40,996 INFO    marketsearch.pipeline: extraction budget spent; 4 stays pending
+2026-07-26 21:51:41,027 INFO    marketsearch.pipeline: bobcat-t770: 3 listings, 3 new, 0 awaiting retry
+2026-07-26 21:51:41,043 INFO    marketsearch.pipeline: extraction budget spent; 1 stays pending
+2026-07-26 21:51:41,054 INFO    marketsearch.pipeline: extraction budget spent; 2 stays pending
+2026-07-26 21:51:41,094 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:41,134 INFO    marketsearch.pipeline: bobcat-t770: 2 listings, 2 new, 0 awaiting retry
+2026-07-26 21:51:41,190 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,233 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,237 INFO    marketsearch.pipeline: 0 saved listing(s) on facebook
+2026-07-26 21:51:41,281 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,333 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,380 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,428 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,474 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,524 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,571 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,616 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,616 WARNING marketsearch.pipeline: watched check failed for 1: markup changed
+2026-07-26 21:51:41,663 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:41,711 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:42,054 WARNING marketsearch.notify.render: photo download failed for https://example.com/bad.jpg: 404
+2026-07-26 21:51:42,111 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:42,238 INFO    marketsearch.pipeline: 0 saved listing(s) on facebook
+2026-07-26 21:51:42,244 INFO    marketsearch.pipeline: run complete: 1 found, 1 new, 1 matched, 0 change(s), 0 error(s)
+2026-07-26 21:51:42,286 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:42,286 INFO    marketsearch.pipeline: 0 saved listing(s) on facebook
+2026-07-26 21:51:42,286 INFO    marketsearch.pipeline: run complete: 1 found, 1 new, 1 matched, 0 change(s), 0 error(s)
+2026-07-26 21:51:42,432 WARNING marketsearch.pipeline: account needs attention (checkpoint); skipping run
+2026-07-26 21:51:42,479 WARNING marketsearch.pipeline: account needs attention (checkpoint); skipping run
+2026-07-26 21:51:42,485 WARNING marketsearch.pipeline: account needs attention (checkpoint); skipping run
+2026-07-26 21:51:42,523 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:42,538 INFO    marketsearch.pipeline: 0 saved listing(s) on facebook
+2026-07-26 21:51:42,548 INFO    marketsearch.pipeline: run complete: 1 found, 1 new, 1 matched, 0 change(s), 0 error(s)
+2026-07-26 21:51:42,664 INFO    marketsearch.pipeline: bobcat-t770: 1 listings, 1 new, 0 awaiting retry
+2026-07-26 21:51:42,664 INFO    marketsearch.pipeline: 0 saved listing(s) on facebook
+2026-07-26 21:51:42,680 INFO    marketsearch.pipeline: run complete: 1 found, 1 new, 1 matched, 0 change(s), 0 error(s)
+2026-07-26 21:51:42,729 INFO    marketsearch.pipeline: bobcat-t770: 0 listings, 0 new, 1 awaiting retry
+2026-07-26 21:51:42,735 INFO    marketsearch.pipeline: 1 saved listing(s) on facebook
+2026-07-26 21:51:42,743 INFO    marketsearch.pipeline: run complete: 0 found, 0 new, 1 matched, 1 change(s), 0 error(s)
+2026-07-26 21:51:42,800 WARNING marketsearch.runstate: reclaiming stale lock at C:\Users\kevin\AppData\Local\Temp\pytest-of-kevin\pytest-27\test_stale_lock_is_reclaimed0\run.lock

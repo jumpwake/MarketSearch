@@ -18,7 +18,7 @@ from marketsearch.notify.delivery import (
     SmsSender,
     resolve_secret,
 )
-from marketsearch.notify.render import RenderedEmail
+from marketsearch.notify.render import MatchCard, RenderedEmail
 from marketsearch.pipeline import run_once
 from marketsearch.runstate import AlreadyRunning, OperationalAlerts, RunLock
 from marketsearch.sources.facebook import FacebookSource, open_login_browser
@@ -191,3 +191,85 @@ def history(
             f"{row['started_at'][:19]:<22}{row['found']:>7}{row['new']:>6}"
             f"{row['matched']:>9}{row['errors']:>8}"
         )
+
+
+def _with_photos(card: MatchCard, store: Store) -> MatchCard:
+    """Re-attach photos to a reconstructed card by re-downloading them.
+
+    Facebook's image URLs may have expired since the run, so this is
+    best-effort by design — a card whose photos fail still renders.
+    """
+    from dataclasses import replace
+
+    from marketsearch.notify.render import download_photos
+
+    detail = store.get_detail(card.listing.listing_id)
+    if detail is None or not detail.photo_urls:
+        return card
+    return replace(card, photos=download_photos(detail.photo_urls))
+
+
+@app.command()
+def preview(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    run_id: int | None = typer.Option(None, "--run", help="Defaults to the latest run."),
+    out: Path = typer.Option(Path("preview.html"), "--out"),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Render the email a run would have sent, and open it in a browser."""
+    import webbrowser
+
+    from marketsearch.notify.render import render_email
+    from marketsearch.shakedown import collect_run_cards
+
+    cfg = _load(config)
+    with Store(db) as store:
+        store.initialize()
+        target = run_id if run_id is not None else store.latest_run_id()
+        if target is None:
+            typer.echo("No runs recorded yet — run `marketsearch run` first.")
+            raise typer.Exit(code=1)
+
+        matches, unverified = collect_run_cards(store, cfg, target)
+        if not (matches or unverified):
+            typer.echo(f"Run {target} produced no matches or unverified listings.")
+            raise typer.Exit(code=0)
+
+        matches = [_with_photos(card, store) for card in matches]
+        unverified = [_with_photos(card, store) for card in unverified]
+
+    email = render_email(matches, unverified, [])
+    out.write_text(email.html, encoding="utf-8")
+    typer.echo(f"Run {target}: {email.subject}\nWrote {out}")
+    if open_browser:
+        webbrowser.open(out.resolve().as_uri())
+
+
+@app.command()
+def replay(
+    search: str = typer.Option(..., "--search", help="Search name from config.yaml."),
+    since: str = typer.Option("30d", "--since", help="e.g. 7d, 36h."),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    save: bool = typer.Option(False, "--save", help="Persist the new verdicts."),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Re-judge stored listings against the criteria currently in config.yaml."""
+    from marketsearch.shakedown import format_replay
+    from marketsearch.shakedown import replay as run_replay
+
+    load_dotenv()
+    setup_logging(DEFAULT_LOG, verbose)
+    cfg = _load(config)
+
+    with Store(db) as store:
+        store.initialize()
+        rows = run_replay(
+            store, cfg, build_extractor(cfg), search_name=search,
+            since=since, save=save,
+        )
+
+    typer.echo(format_replay(rows, search))
+    if not save and rows:
+        typer.echo("\n(Not saved. Re-run with --save to persist these verdicts.)")
