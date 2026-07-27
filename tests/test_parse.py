@@ -9,6 +9,7 @@ from marketsearch.sources.parse import (
     detect_login_wall,
     extract_json_blobs,
     iter_dicts,
+    parse_graphql_payload,
     parse_item_detail,
     parse_saved_listings,
     parse_search_results,
@@ -195,3 +196,48 @@ def test_real_saved_page_parses(fixtures_dir: Path):
     saved = parse_saved_listings(real_page(fixtures_dir, "real_saved.html"))
     for listing in saved:
         assert listing.listing_id.isdigit()
+
+
+GRAPHQL_NODE = (
+    '{{"__typename":"GroupCommerceProductItem","id":"{i}",'
+    '"marketplace_listing_title":"2011 Bobcat {i}",'
+    '"listing_price":{{"amount":"15500.00","formatted_amount":"$15,500"}},'
+    '"location":{{"reverse_geocode":{{"city":"Shullsburg","state":"Wisconsin"}}}}}}'
+)
+
+
+def graphql_body(*chunks: tuple[str, ...]) -> str:
+    """One JSON document per line, as Facebook frames GraphQL responses."""
+    lines = []
+    for ids in chunks:
+        nodes = ",".join(f'{{"node":{GRAPHQL_NODE.format(i=i)}}}' for i in ids)
+        lines.append(
+            '{"data":{"marketplace_search":{"feed_units":{"edges":[' + nodes + "]}}}}"
+        )
+    return "\n".join(lines)
+
+
+def test_parse_graphql_payload_reads_every_newline_delimited_chunk():
+    """A whole-body json.loads fails on these — Facebook sends one document
+    per line, and the listings we want are in the later ones."""
+    body = graphql_body(("1", "2"), ("3",))
+    assert [l.listing_id for l in parse_graphql_payload(body)] == ["1", "2", "3"]
+
+
+def test_parse_graphql_payload_keeps_price_and_title():
+    listing = parse_graphql_payload(graphql_body(("7",)))[0]
+    assert listing.price_cents == 1_550_000
+    assert listing.title == "2011 Bobcat 7"
+
+
+def test_parse_graphql_payload_deduplicates_by_id():
+    body = graphql_body(("1", "2"), ("2", "3"))
+    assert [l.listing_id for l in parse_graphql_payload(body)] == ["1", "2", "3"]
+
+
+def test_parse_graphql_payload_is_silent_on_unrelated_traffic():
+    """Most GraphQL responses have nothing to do with listings. That is normal,
+    not a parse failure."""
+    assert parse_graphql_payload('{"data":{"viewer":{"id":"1"}}}') == []
+    assert parse_graphql_payload("not json at all") == []
+    assert parse_graphql_payload("") == []

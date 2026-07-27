@@ -31,6 +31,7 @@ from marketsearch.sources.parse import (
     detect_unavailable,
     parse_item_detail,
     parse_saved_listings,
+    parse_graphql_payload,
     parse_search_results,
 )
 
@@ -49,8 +50,14 @@ _PAGE_TIMEOUT_MS = 45_000
 # Scrolling past the first screenful of search results.
 _MAX_SCROLLS = 15
 _SCROLL_PX = 4000
-_SCROLL_SETTLE_MS = 1200
+_SCROLL_POLL_MS = 400
+# How long to keep polling for a scrolled batch before calling it exhausted.
+_SCROLL_PATIENCE_MS = 5000
 _DEFAULT_TARGET_LISTINGS = 100
+
+# Scrolled results arrive here as text/html, so the URL is the only filter.
+_GRAPHQL_PATH = "/api/graphql/"
+_LISTING_MARKER = '"marketplace_listing_title"'
 
 
 def build_search_url(query: str, radius_miles: int) -> str:
@@ -68,32 +75,48 @@ def build_item_url(listing_id: str) -> str:
 
 def scroll_for_more(
     page,
-    initial_count: int,
+    count: Callable[[], int],
     target: int,
-    count: Callable[[str], int],
     max_scrolls: int = _MAX_SCROLLS,
-) -> list[str]:
-    """Scroll a loaded search page, returning one HTML snapshot per scroll.
+) -> int:
+    """Scroll a loaded search page until no more listings arrive.
 
-    Marketplace ships roughly 24 cards per screenful and appends the rest as you
-    scroll, so a single page load sees only the first page of results. Stops as
-    soon as the count reaches `target` or a scroll adds nothing — an exhausted
-    result set and a failed load look the same from here, and both mean stop.
+    Marketplace ships roughly 24 cards per screenful and fetches the rest over
+    GraphQL as you scroll. Those results never reach the page's JSON script
+    tags, so `count` must report what the response listener has collected, not
+    what `page.content()` parses to.
+
+    Returns the number of scrolls performed. Stops as soon as the count reaches
+    `target` or a scroll adds nothing — an exhausted result set and a stalled
+    load look the same from here, and both mean stop.
     """
-    snapshots: list[str] = []
-    seen = initial_count
-    for _ in range(max_scrolls):
+    seen = count()
+    for scrolls in range(max_scrolls):
         if seen >= target:
-            break
+            return scrolls
         page.mouse.wheel(0, _SCROLL_PX)
-        page.wait_for_timeout(_SCROLL_SETTLE_MS)
-        html = page.content()
-        snapshots.append(html)
-        found = count(html)
+        found = _wait_for_growth(page, count, seen)
         if found <= seen:
-            break
+            return scrolls + 1
         seen = found
-    return snapshots
+    return max_scrolls
+
+
+def _wait_for_growth(page, count: Callable[[], int], seen: int) -> int:
+    """Poll until the listing count grows, or patience runs out.
+
+    A fixed settle time cannot tell a slow GraphQL response from an exhausted
+    result set. Waiting for the count itself to move returns as soon as the
+    batch lands and still gives up in bounded time when nothing is coming.
+    """
+    waited = 0
+    while waited < _SCROLL_PATIENCE_MS:
+        page.wait_for_timeout(_SCROLL_POLL_MS)
+        waited += _SCROLL_POLL_MS
+        found = count()
+        if found > seen:
+            return found
+    return count()
 
 
 class FacebookSource:
@@ -114,6 +137,8 @@ class FacebookSource:
         self._context = None
         self._page = None
         self._loaded_any_page = False
+        # Listings seen in GraphQL traffic since the current search began.
+        self._scrolled: dict[str, RawListing] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -147,6 +172,30 @@ class FacebookSource:
         self._page = (
             self._context.pages[0] if self._context.pages else self._context.new_page()
         )
+        self._attach_response_listener(self._page)
+
+    def _attach_response_listener(self, page) -> None:
+        page.on("response", self._collect_scrolled_listings)
+
+    def _collect_scrolled_listings(self, response) -> None:
+        """Harvest listings from Marketplace's GraphQL traffic.
+
+        Results past the first screenful are fetched over GraphQL and rendered
+        straight into the DOM — they never appear in the page's JSON script
+        tags, so this listener is the only place they can be picked up. The
+        responses come back as text/html, so the URL is the only reliable
+        filter.
+        """
+        if _GRAPHQL_PATH not in response.url:
+            return
+        try:
+            body = response.text()
+        except Exception:  # body already consumed, redirect, aborted request
+            return
+        if _LISTING_MARKER not in body:
+            return
+        for listing in parse_graphql_payload(body):
+            self._scrolled.setdefault(listing.listing_id, listing)
 
     # ---- page fetching ---------------------------------------------------
 
@@ -196,6 +245,8 @@ class FacebookSource:
     def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]:
         url = build_search_url(query, radius_miles)
         log.info("searching %r (location %s, %d mi)", query, location, radius_miles)
+        # Results are per-search; last query's traffic must not bleed into this one.
+        self._scrolled.clear()
         html = self._load(url, "search")
         try:
             found = parse_search_results(html)
@@ -207,17 +258,18 @@ class FacebookSource:
             return found
 
         merged = {l.listing_id: l for l in found}
-        snapshots = scroll_for_more(
-            self._page,
-            initial_count=len(merged),
-            target=self.max_listings_per_search,
-            count=lambda h: len(parse_search_results(h)),
-        )
-        for snapshot in snapshots:
-            for listing in parse_search_results(snapshot):
-                merged.setdefault(listing.listing_id, listing)
 
-        log.info("%r: %d listing(s) after %d scroll(s)", query, len(merged), len(snapshots))
+        def absorb() -> int:
+            for listing_id, listing in self._scrolled.items():
+                merged.setdefault(listing_id, listing)
+            return len(merged)
+
+        scrolls = scroll_for_more(
+            self._page, count=absorb, target=self.max_listings_per_search
+        )
+        absorb()
+
+        log.info("%r: %d listing(s) after %d scroll(s)", query, len(merged), scrolls)
         return list(merged.values())
 
     def fetch_detail(self, listing_id: str) -> ListingDetail:

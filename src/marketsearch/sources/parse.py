@@ -146,6 +146,33 @@ def parse_search_results(html: str) -> list[RawListing]:
     return list(listings.values())
 
 
+def parse_graphql_payload(body: str) -> list[RawListing]:
+    """Listings from a Marketplace GraphQL response.
+
+    Scrolling a search page fetches more results over GraphQL rather than
+    re-rendering the page's JSON script tags, so these bodies are the only
+    place results past the first screenful appear. Facebook frames them as one
+    JSON document per line, which is why a whole-body parse fails.
+
+    Unlike the page parser, a body with no listings is not an error: most
+    GraphQL traffic on the page has nothing to do with search results.
+    """
+    listings: dict[str, RawListing] = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            blob = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        for node in iter_dicts(blob):
+            if _looks_like_listing(node):
+                listing = _to_raw_listing(node)
+                listings.setdefault(listing.listing_id, listing)
+    return list(listings.values())
+
+
 def parse_saved_listings(html: str) -> list[RawListing]:
     """Listings from the saved-items page.
 

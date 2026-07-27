@@ -106,58 +106,103 @@ def test_source_is_a_context_manager(fixtures_dir: Path, tmp_path: Path):
         assert [l.listing_id for l in src.fetch_saved()] == ["1001", "2002"]
 
 
-class FakePage:
-    """Enough of a Playwright page to drive the scroll loop."""
 
-    def __init__(self, snapshots: list[str]) -> None:
-        self._snapshots = snapshots
-        self.scrolls = 0
-        self.waits = 0
 
-    def content(self) -> str:
-        return self._snapshots[min(self.scrolls, len(self._snapshots) - 1)]
+GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
 
-    @property
-    def mouse(self):
-        return self
+
+class FakeResponse:
+    def __init__(self, url: str, body: str) -> None:
+        self.url = url
+        self._body = body
+
+    def text(self) -> str:
+        return self._body
+
+
+class FakeMouse:
+    def __init__(self, page: "FakePage") -> None:
+        self._page = page
 
     def wheel(self, dx: int, dy: int) -> None:
-        self.scrolls += 1
+        self._page.scrolls += 1
+        self._page.schedule_next_batch()
+
+
+class FakePage:
+    """Enough of a Playwright page to drive the scroll loop: each scroll
+    delivers the next batch of GraphQL responses to the registered handler."""
+
+    def __init__(self, html: str = "", batches: list[list[FakeResponse]] | None = None,
+                 latency_waits: int = 1):
+        self._html = html
+        self._batches = list(batches or [])
+        self._handlers: dict[str, list] = {}
+        self._latency_waits = latency_waits
+        self._deliver_at: int | None = None
+        self.scrolls = 0
+        self.waits = 0
+        self.mouse = FakeMouse(self)
+
+    def on(self, event: str, handler) -> None:
+        self._handlers.setdefault(event, []).append(handler)
+
+    def schedule_next_batch(self) -> None:
+        """A scrolled response lands some number of polls after the scroll."""
+        if self._batches:
+            self._deliver_at = self.waits + self._latency_waits
+
+    def _deliver_next_batch(self) -> None:
+        self._deliver_at = None
+        if not self._batches:
+            return
+        for response in self._batches.pop(0):
+            for handler in self._handlers.get("response", []):
+                handler(response)
+
+    def content(self) -> str:
+        return self._html
 
     def wait_for_timeout(self, ms: int) -> None:
         self.waits += 1
+        if self._deliver_at is not None and self.waits >= self._deliver_at:
+            self._deliver_next_batch()
 
 
-def cards(*ids: str) -> str:
-    return " ".join(f"card-{i}" for i in ids)
+def counter(*values: int):
+    """A count() that yields each value in turn, then repeats the last."""
+    seen = list(values)
+
+    def count() -> int:
+        return seen.pop(0) if len(seen) > 1 else seen[0]
+
+    return count
 
 
-def count_cards(html: str) -> int:
-    return len(html.split())
-
-
-def test_scroll_collects_pages_until_the_count_stops_growing():
-    page = FakePage([cards("1", "2"), cards("1", "2", "3"), cards("1", "2", "3")])
-    extra = scroll_for_more(page, initial_count=2, target=100, count=count_cards)
-    assert page.scrolls == 2  # one that grew, one that did not
-    assert extra == [cards("1", "2", "3"), cards("1", "2", "3")]
+def test_scroll_stops_once_a_scroll_adds_nothing():
+    page = FakePage()
+    scrolls = scroll_for_more(page, count=counter(24, 48, 48), target=100)
+    assert scrolls == 2  # one that grew, one that did not
+    assert page.scrolls == 2
 
 
 def test_scroll_stops_once_the_target_is_reached():
-    page = FakePage([cards("1"), cards("1", "2", "3")])
-    scroll_for_more(page, initial_count=1, target=3, count=count_cards)
-    assert page.scrolls == 1
+    page = FakePage()
+    scrolls = scroll_for_more(page, count=counter(24, 72, 120), target=100)
+    assert scrolls == 2
+    assert page.scrolls == 2
 
 
 def test_scroll_does_not_touch_the_page_when_already_at_target():
-    page = FakePage([cards("1", "2")])
-    assert scroll_for_more(page, initial_count=2, target=2, count=count_cards) == []
+    page = FakePage()
+    assert scroll_for_more(page, count=counter(100), target=100) == 0
     assert page.scrolls == 0
 
 
 def test_scroll_is_bounded_even_when_the_page_keeps_growing():
-    page = FakePage([cards(*(str(i) for i in range(n))) for n in range(1, 60)])
-    scroll_for_more(page, initial_count=1, target=1000, count=count_cards, max_scrolls=4)
+    page = FakePage()
+    count = iter(range(1, 500))
+    scroll_for_more(page, count=lambda: next(count), target=10_000, max_scrolls=4)
     assert page.scrolls == 4
 
 
@@ -168,16 +213,67 @@ def results_page(*ids: str) -> str:
     return f'<script type="application/json">{{"edges":[{nodes}]}}</script>'
 
 
-def test_search_merges_listings_found_across_scrolls(tmp_path: Path):
-    """The first screenful is 24 cards; the rest arrive only after scrolling."""
+def graphql_response(*ids: str) -> FakeResponse:
+    nodes = ",".join(
+        f'{{"node":{{"id":"{i}","marketplace_listing_title":"Bobcat T770 #{i}"}}}}'
+        for i in ids
+    )
+    body = '{"data":{"marketplace_search":{"feed_units":{"edges":[' + nodes + "]}}}}"
+    return FakeResponse(GRAPHQL_URL, body)
+
+
+def test_search_merges_listings_that_arrive_over_graphql(tmp_path: Path):
+    """The first screenful comes from the page's script tags; everything past
+    it arrives only as GraphQL traffic while scrolling."""
     src = source_returning(results_page("1", "2"), tmp_path)
-    src._page = FakePage([results_page("1", "2", "3"), results_page("1", "2", "3")])
+    src._page = FakePage(batches=[[graphql_response("3", "4")], [graphql_response("5")]])
+    src._attach_response_listener(src._page)
 
     found = src.search("Bobcat T770", "Springfield, IL", 250)
 
-    assert [l.listing_id for l in found] == ["1", "2", "3"]
+    assert [l.listing_id for l in found] == ["1", "2", "3", "4", "5"]
 
 
-def test_search_without_a_browser_page_returns_the_first_page(tmp_path: Path):
+def test_search_ignores_graphql_traffic_that_carries_no_listings(tmp_path: Path):
+    src = source_returning(results_page("1"), tmp_path)
+    src._page = FakePage(batches=[[FakeResponse(GRAPHQL_URL, '{"data":{"viewer":1}}')]])
+    src._attach_response_listener(src._page)
+
+    assert [l.listing_id for l in src.search("q", "loc", 250)] == ["1"]
+
+
+def test_search_does_not_leak_listings_between_searches(tmp_path: Path):
+    """Each search must report its own results, not the previous query's."""
+    src = source_returning(results_page("1"), tmp_path)
+    src._page = FakePage(batches=[[graphql_response("2")]])
+    src._attach_response_listener(src._page)
+    src.search("first query", "loc", 250)
+
+    src._page = FakePage(batches=[[graphql_response("9")]])
+    src._attach_response_listener(src._page)
+    second = src.search("second query", "loc", 250)
+
+    assert [l.listing_id for l in second] == ["1", "9"]
+
+
+def test_scroll_waits_for_a_slow_graphql_response_before_giving_up(tmp_path: Path):
+    """A response that lands three polls after the scroll is still a result.
+    Treating one quiet poll as 'exhausted' is what capped every search at 48."""
     src = source_returning(results_page("1", "2"), tmp_path)
-    assert [l.listing_id for l in src.search("q", "loc", 250)] == ["1", "2"]
+    src._page = FakePage(
+        batches=[[graphql_response("3", "4")], [graphql_response("5", "6")]],
+        latency_waits=3,
+    )
+    src._attach_response_listener(src._page)
+
+    found = src.search("Bobcat T770", "Springfield, IL", 250)
+
+    assert [l.listing_id for l in found] == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_scroll_gives_up_when_nothing_ever_arrives():
+    """Patience must be bounded, or an exhausted result set hangs the sweep."""
+    page = FakePage()
+    scrolls = scroll_for_more(page, count=counter(24), target=100)
+    assert scrolls == 1
+    assert page.waits <= 20
