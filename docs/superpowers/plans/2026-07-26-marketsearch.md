@@ -2554,3 +2554,1434 @@ If a case fails, the fix is the `SYSTEM_PROMPT` in `src/marketsearch/extract.py`
 git add tests/fixtures/listings tests/test_extract_golden.py
 git commit -m "test: golden-file extraction cases covering hour-parsing edge cases"
 ```
+
+---
+
+## Task 10: Facebook page parsing
+
+**Files:**
+- Create: `src/marketsearch/sources/__init__.py`, `src/marketsearch/sources/base.py`, `src/marketsearch/sources/parse.py`, `tests/fixtures/pages/*.html`
+- Test: `tests/test_parse.py`
+
+**Interfaces:**
+- Consumes: `RawListing`, `ListingDetail` (Task 1)
+- Produces:
+  - `sources/base.py`: `ListingSource` Protocol with `search(query, location, radius_miles) -> list[RawListing]`, `fetch_detail(listing_id) -> ListingDetail`, `fetch_saved() -> list[str]`; exceptions `SourceError`, `LoginRequired`, `ParseError`
+  - `sources/parse.py`: `extract_json_blobs(html) -> list[Any]`, `iter_dicts(obj) -> Iterator[dict]`, `parse_search_results(html) -> list[RawListing]`, `parse_item_detail(html, listing_id) -> ListingDetail`, `parse_saved_ids(html) -> list[str]`, `detect_login_wall(html) -> str | None`
+
+**Design note.** Parsing walks the embedded JSON looking for *nodes with the right keys*, never for a fixed path. Facebook rotates CSS class names and restructures its payload tree constantly, but the leaf key names (`marketplace_listing_title`, `listing_price`) are far more stable. A path-based parser breaks weekly; a key-based one survives most reshuffles.
+
+- [ ] **Step 1: Create the fixture pages**
+
+These are synthetic but structurally faithful — a `<script type="application/json">` blob wrapping listing nodes, which is the shape Facebook actually ships. Task 11 replaces them with captures of real pages.
+
+Create `tests/fixtures/pages/search.html`:
+
+```html
+<!DOCTYPE html><html><head><title>Marketplace</title></head><body>
+<script type="application/json" data-sjs>
+{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"result":{"data":{"marketplace_search":{"feed_units":{"edges":[
+ {"node":{"listing":{"id":"1001","marketplace_listing_title":"2019 Bobcat T770 Compact Track Loader","listing_price":{"amount":"38000","formatted_amount":"$38,000"},"location":{"reverse_geocode":{"city":"Olathe","state":"KS","city_page":{"display_name":"Olathe, KS"}}},"primary_listing_photo":{"image":{"uri":"https://scontent.example.com/1001.jpg"}},"marketplace_listing_seller":{"name":"Dale S"}}}},
+ {"node":{"listing":{"id":"1002","marketplace_listing_title":"WANTED Bobcat T770","listing_price":{"amount":"1","formatted_amount":"$1"},"location":{"reverse_geocode":{"city":"Topeka","state":"KS","city_page":{"display_name":"Topeka, KS"}}},"primary_listing_photo":{"image":{"uri":"https://scontent.example.com/1002.jpg"}},"marketplace_listing_seller":{"name":"Rita M"}}}},
+ {"node":{"listing":{"id":"1003","marketplace_listing_title":"Bobcat T300 skid steer","listing_price":null,"location":{"reverse_geocode":{"city":"Lawrence","state":"KS","city_page":{"display_name":"Lawrence, KS"}}},"primary_listing_photo":null,"marketplace_listing_seller":null}}}
+]}}}}}}]]]}
+</script>
+<script type="application/json">{"unrelated":{"nested":{"noise":true}}}</script>
+</body></html>
+```
+
+Create `tests/fixtures/pages/item.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<script type="application/json" data-sjs>
+{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"result":{"data":{"viewer":{"marketplace_product_details_page":{"target":{
+ "id":"1001",
+ "marketplace_listing_title":"2019 Bobcat T770 Compact Track Loader",
+ "redacted_description":{"text":"2019 Bobcat T770, 2,400 hours. Enclosed cab with heat and A/C. 2-speed, high flow. Recently serviced."},
+ "listing_price":{"amount":"38000","formatted_amount":"$38,000"},
+ "location_text":{"text":"Olathe, KS"},
+ "delivery_types":["IN_PERSON"],
+ "attribute_data":[{"label":"Condition","value":"Used - good"},{"label":"Category","value":"Heavy Equipment"}],
+ "listing_photos":[{"image":{"uri":"https://scontent.example.com/1001-a.jpg"}},{"image":{"uri":"https://scontent.example.com/1001-b.jpg"}}]
+}}}}}}}]]]}
+</script>
+</body></html>
+```
+
+Create `tests/fixtures/pages/saved.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<script type="application/json" data-sjs>
+{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"result":{"data":{"viewer":{"saved_dashboard":{"saved_items":{"edges":[
+ {"node":{"listing":{"id":"1001","marketplace_listing_title":"2019 Bobcat T770 Compact Track Loader","listing_price":{"amount":"38000"},"location":null,"primary_listing_photo":null,"marketplace_listing_seller":null}}}},
+ {"node":{"listing":{"id":"2002","marketplace_listing_title":"2017 Bobcat T300","listing_price":{"amount":"24500"},"location":null,"primary_listing_photo":null,"marketplace_listing_seller":null}}}}
+]}}}}}}}]]]}
+</script>
+</body></html>
+```
+
+Create `tests/fixtures/pages/login_wall.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<form action="/login/device-based/regular/login/" method="post">
+<input name="email"><input name="pass" type="password">
+<button name="login">Log In</button>
+</form>
+</body></html>
+```
+
+Create `tests/fixtures/pages/checkpoint.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<div id="checkpoint">We need to confirm it's you. Please complete a security check to continue.</div>
+</body></html>
+```
+
+Create `tests/fixtures/pages/empty_results.html`:
+
+```html
+<!DOCTYPE html><html><body>
+<script type="application/json" data-sjs>
+{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"result":{"data":{"marketplace_search":{"feed_units":{"edges":[]}}}}}}]]]}
+</script>
+<div>No results found</div>
+</body></html>
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/test_parse.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.sources.base import ParseError
+from marketsearch.sources.parse import (
+    detect_login_wall,
+    extract_json_blobs,
+    iter_dicts,
+    parse_item_detail,
+    parse_saved_ids,
+    parse_search_results,
+)
+
+
+def page(fixtures_dir: Path, name: str) -> str:
+    return (fixtures_dir / "pages" / name).read_text(encoding="utf-8")
+
+
+def test_extract_json_blobs_finds_all_script_payloads(fixtures_dir: Path):
+    blobs = extract_json_blobs(page(fixtures_dir, "search.html"))
+    assert len(blobs) == 2
+
+
+def test_extract_json_blobs_skips_unparseable_scripts():
+    html = '<script type="application/json">{"good":1}</script>' \
+           '<script type="application/json">not json</script>'
+    assert extract_json_blobs(html) == [{"good": 1}]
+
+
+def test_iter_dicts_walks_lists_and_nested_dicts():
+    tree = {"a": [{"b": 1}, {"c": {"d": 2}}]}
+    found = list(iter_dicts(tree))
+    assert {"b": 1} in found
+    assert {"d": 2} in found
+
+
+def test_parse_search_results_returns_all_listings(fixtures_dir: Path):
+    listings = parse_search_results(page(fixtures_dir, "search.html"))
+    assert [l.listing_id for l in listings] == ["1001", "1002", "1003"]
+
+
+def test_parse_search_results_maps_fields(fixtures_dir: Path):
+    listings = parse_search_results(page(fixtures_dir, "search.html"))
+    first = listings[0]
+    assert first.title == "2019 Bobcat T770 Compact Track Loader"
+    assert first.price_cents == 3_800_000
+    assert first.location == "Olathe, KS"
+    assert first.seller_name == "Dale S"
+    assert first.thumbnail_url == "https://scontent.example.com/1001.jpg"
+    assert first.url == "https://www.facebook.com/marketplace/item/1001/"
+
+
+def test_parse_search_results_tolerates_missing_optional_fields(fixtures_dir: Path):
+    listings = parse_search_results(page(fixtures_dir, "search.html"))
+    third = listings[2]
+    assert third.price_cents is None
+    assert third.thumbnail_url is None
+    assert third.seller_name is None
+
+
+def test_parse_search_results_deduplicates_repeated_nodes():
+    """Facebook's payload often contains the same listing in several places."""
+    html = (
+        '<script type="application/json">'
+        '{"a":{"id":"1","marketplace_listing_title":"T770","listing_price":{"amount":"1"}},'
+        ' "b":{"id":"1","marketplace_listing_title":"T770","listing_price":{"amount":"1"}}}'
+        "</script>"
+    )
+    assert len(parse_search_results(html)) == 1
+
+
+def test_empty_results_page_returns_empty_list_not_an_error(fixtures_dir: Path):
+    """Distinguishing 'zero results' from 'could not parse' is the whole point."""
+    assert parse_search_results(page(fixtures_dir, "empty_results.html")) == []
+
+
+def test_page_with_no_json_at_all_raises_parse_error():
+    with pytest.raises(ParseError, match="no JSON payload"):
+        parse_search_results("<html><body>Something went wrong</body></html>")
+
+
+def test_parse_item_detail(fixtures_dir: Path):
+    detail = parse_item_detail(page(fixtures_dir, "item.html"), "1001")
+    assert "2,400 hours" in detail.description
+    assert detail.photo_urls == [
+        "https://scontent.example.com/1001-a.jpg",
+        "https://scontent.example.com/1001-b.jpg",
+    ]
+    assert detail.structured_fields["Condition"] == "Used - good"
+    assert detail.structured_fields["Category"] == "Heavy Equipment"
+
+
+def test_parse_item_detail_raises_when_the_listing_node_is_absent(fixtures_dir: Path):
+    with pytest.raises(ParseError, match="1001"):
+        parse_item_detail(page(fixtures_dir, "empty_results.html"), "1001")
+
+
+def test_parse_saved_ids(fixtures_dir: Path):
+    assert parse_saved_ids(page(fixtures_dir, "saved.html")) == ["1001", "2002"]
+
+
+def test_parse_saved_ids_returns_empty_for_an_empty_collection(fixtures_dir: Path):
+    assert parse_saved_ids(page(fixtures_dir, "empty_results.html")) == []
+
+
+def test_detect_login_wall(fixtures_dir: Path):
+    assert detect_login_wall(page(fixtures_dir, "login_wall.html")) == "login"
+
+
+def test_detect_checkpoint(fixtures_dir: Path):
+    assert detect_login_wall(page(fixtures_dir, "checkpoint.html")) == "checkpoint"
+
+
+def test_detect_login_wall_returns_none_for_a_normal_page(fixtures_dir: Path):
+    assert detect_login_wall(page(fixtures_dir, "search.html")) is None
+```
+
+- [ ] **Step 3: Run the test to verify it fails**
+
+Run: `pytest tests/test_parse.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.sources'`
+
+- [ ] **Step 4: Write `sources/base.py`**
+
+Create `src/marketsearch/sources/__init__.py` (empty file).
+
+Create `src/marketsearch/sources/base.py`:
+
+```python
+"""The boundary between MarketSearch and any particular marketplace.
+
+Everything downstream of this file speaks only RawListing and ListingDetail.
+Swapping Facebook for a paid scraping API means writing one new class here.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from marketsearch.models import ListingDetail, RawListing
+
+
+class SourceError(Exception):
+    """Any failure while talking to the listing source."""
+
+
+class LoginRequired(SourceError):
+    """The source demanded a login or presented a security checkpoint.
+
+    Callers must stop immediately rather than retrying — retrying a checkpoint
+    is how a soft flag becomes a hard one.
+    """
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"facebook requires attention: {kind}")
+        self.kind = kind
+
+
+class ParseError(SourceError):
+    """The page loaded but its structure was not recognised.
+
+    Distinct from 'zero results', which is an ordinary empty list.
+    """
+
+
+class ListingSource(Protocol):
+    def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]: ...
+    def fetch_detail(self, listing_id: str) -> ListingDetail: ...
+    def fetch_saved(self) -> list[str]: ...
+```
+
+- [ ] **Step 5: Write `sources/parse.py`**
+
+Create `src/marketsearch/sources/parse.py`:
+
+```python
+"""Pure functions over Facebook page HTML.
+
+No browser, no network — every rule here is testable against a saved page.
+This is the module that breaks when Facebook changes, so it needs the fastest
+possible test cycle.
+
+Strategy: walk every embedded JSON payload looking for *nodes carrying the
+right keys*, never for a fixed path. Facebook restructures its payload tree
+often; the leaf key names change far more slowly.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Iterator
+
+from marketsearch.models import ListingDetail, RawListing
+from marketsearch.sources.base import ParseError
+
+_SCRIPT_JSON = re.compile(
+    r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+_LOGIN_MARKERS = ('name="pass"', 'action="/login/', "login_form")
+_CHECKPOINT_MARKERS = ("checkpoint", "confirm it's you", "security check")
+
+ITEM_URL = "https://www.facebook.com/marketplace/item/{listing_id}/"
+
+
+def extract_json_blobs(html: str) -> list[Any]:
+    """Every parseable JSON payload embedded in the page. Unparseable script
+    bodies are skipped rather than fatal — Facebook ships several formats."""
+    blobs: list[Any] = []
+    for match in _SCRIPT_JSON.finditer(html):
+        try:
+            blobs.append(json.loads(match.group(1)))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return blobs
+
+
+def iter_dicts(obj: Any) -> Iterator[dict]:
+    """Yield every dict anywhere in a nested structure, including the root."""
+    if isinstance(obj, dict):
+        yield obj
+        for value in obj.values():
+            yield from iter_dicts(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from iter_dicts(item)
+
+
+def _all_dicts(html: str) -> list[dict]:
+    blobs = extract_json_blobs(html)
+    if not blobs:
+        raise ParseError(
+            "no JSON payload found in page — Facebook's markup has probably changed"
+        )
+    return [d for blob in blobs for d in iter_dicts(blob)]
+
+
+def _looks_like_listing(node: dict) -> bool:
+    return "id" in node and "marketplace_listing_title" in node
+
+
+def _price_cents(node: dict) -> int | None:
+    price = node.get("listing_price")
+    if not isinstance(price, dict):
+        return None
+    amount = price.get("amount")
+    if amount is None:
+        return None
+    try:
+        return int(round(float(amount) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def _location(node: dict) -> str | None:
+    loc = node.get("location")
+    if isinstance(loc, dict):
+        geo = loc.get("reverse_geocode")
+        if isinstance(geo, dict):
+            page = geo.get("city_page")
+            if isinstance(page, dict) and page.get("display_name"):
+                return str(page["display_name"])
+            city, state = geo.get("city"), geo.get("state")
+            if city and state:
+                return f"{city}, {state}"
+    text = node.get("location_text")
+    if isinstance(text, dict) and text.get("text"):
+        return str(text["text"])
+    return None
+
+
+def _thumbnail(node: dict) -> str | None:
+    photo = node.get("primary_listing_photo")
+    if isinstance(photo, dict):
+        image = photo.get("image")
+        if isinstance(image, dict) and image.get("uri"):
+            return str(image["uri"])
+    return None
+
+
+def _seller(node: dict) -> str | None:
+    seller = node.get("marketplace_listing_seller")
+    if isinstance(seller, dict) and seller.get("name"):
+        return str(seller["name"])
+    return None
+
+
+def _to_raw_listing(node: dict) -> RawListing:
+    listing_id = str(node["id"])
+    return RawListing(
+        listing_id=listing_id,
+        title=str(node["marketplace_listing_title"]),
+        price_cents=_price_cents(node),
+        location=_location(node),
+        url=ITEM_URL.format(listing_id=listing_id),
+        thumbnail_url=_thumbnail(node),
+        seller_name=_seller(node),
+    )
+
+
+def parse_search_results(html: str) -> list[RawListing]:
+    """All listings on a search page, in payload order, deduplicated by id.
+
+    An empty list means Facebook returned no results. A ParseError means the
+    page could not be understood at all. Conflating those is how a scraper
+    silently reports nothing for three weeks.
+    """
+    listings: dict[str, RawListing] = {}
+    for node in _all_dicts(html):
+        if _looks_like_listing(node):
+            listing = _to_raw_listing(node)
+            listings.setdefault(listing.listing_id, listing)
+    return list(listings.values())
+
+
+def parse_saved_ids(html: str) -> list[str]:
+    """Listing ids from the saved-items page, in order, deduplicated."""
+    seen: list[str] = []
+    for node in _all_dicts(html):
+        if _looks_like_listing(node):
+            listing_id = str(node["id"])
+            if listing_id not in seen:
+                seen.append(listing_id)
+    return seen
+
+
+def _description(node: dict) -> str:
+    for key in ("redacted_description", "description"):
+        value = node.get(key)
+        if isinstance(value, dict) and value.get("text"):
+            return str(value["text"])
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _structured_fields(node: dict) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    attributes = node.get("attribute_data")
+    if isinstance(attributes, list):
+        for attribute in attributes:
+            if isinstance(attribute, dict) and attribute.get("label"):
+                fields[str(attribute["label"])] = attribute.get("value")
+    for key in ("delivery_types", "creation_time", "is_sold"):
+        if key in node:
+            fields[key] = node[key]
+    return fields
+
+
+def _photo_urls(node: dict) -> list[str]:
+    urls: list[str] = []
+    photos = node.get("listing_photos")
+    if isinstance(photos, list):
+        for photo in photos:
+            if isinstance(photo, dict):
+                image = photo.get("image")
+                if isinstance(image, dict) and image.get("uri"):
+                    uri = str(image["uri"])
+                    if uri not in urls:
+                        urls.append(uri)
+    return urls
+
+
+def parse_item_detail(html: str, listing_id: str) -> ListingDetail:
+    """The detail page for one listing.
+
+    Prefers the node whose id matches; falls back to the richest listing-shaped
+    node, since Facebook occasionally omits the id on the detail payload.
+    """
+    candidates = [n for n in _all_dicts(html) if _looks_like_listing(n)]
+    exact = [n for n in candidates if str(n.get("id")) == str(listing_id)]
+    pool = exact or [n for n in candidates if "redacted_description" in n or "description" in n]
+    if not pool:
+        raise ParseError(f"no listing node found for {listing_id} on the detail page")
+
+    node = max(pool, key=lambda n: len(_description(n)))
+    return ListingDetail(
+        listing_id=str(listing_id),
+        description=_description(node),
+        structured_fields=_structured_fields(node),
+        photo_urls=_photo_urls(node),
+        distance_miles=None,
+    )
+
+
+def detect_login_wall(html: str) -> str | None:
+    """Return 'login', 'checkpoint', or None.
+
+    Checked before parsing on every page. A non-None result must stop the run
+    immediately — never retry into a checkpoint.
+    """
+    lowered = html.lower()
+    if any(marker in lowered for marker in _CHECKPOINT_MARKERS):
+        return "checkpoint"
+    if any(marker.lower() in lowered for marker in _LOGIN_MARKERS):
+        return "login"
+    return None
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `pytest tests/test_parse.py -v`
+Expected: 16 passed
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/marketsearch/sources tests/test_parse.py tests/fixtures/pages
+git commit -m "feat: key-based parsing of facebook marketplace json payloads"
+```
+
+---
+
+## Task 11: Playwright Facebook driver
+
+**Files:**
+- Create: `src/marketsearch/sources/facebook.py`
+- Test: `tests/test_facebook_source.py`
+
+**Interfaces:**
+- Consumes: `parse_*` and `detect_login_wall` (Task 10), `LoginRequired`, `ParseError` (Task 10)
+- Produces:
+  - `build_search_url(query: str, radius_miles: int) -> str`
+  - `build_item_url(listing_id: str) -> str`
+  - `SAVED_URL: str`
+  - `FacebookSource(profile_dir: Path, headless: bool = True, debug_dir: Path | None = None, fetch_html: Callable[[str], str] | None = None)` implementing `ListingSource`, usable as a context manager
+  - `open_login_browser(profile_dir: Path) -> None`
+
+**Design note.** `fetch_html` is injectable. Production leaves it `None` and the class drives Playwright; tests pass a stub, so the whole suite runs with no browser and no network. This is also what lets Task 15's pipeline tests exercise real orchestration against canned pages.
+
+**Location handling.** Facebook derives Marketplace location from the logged-in profile, not from a URL parameter that can be reliably constructed. Rather than guess at location-id resolution, the user sets their Marketplace location and radius by hand once during `marketsearch login`; the persistent profile remembers it. `radius_miles` is still sent as a URL hint, and `location` is carried in the interface for diagnostics and for future non-Facebook sources.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_facebook_source.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from marketsearch.sources.base import LoginRequired, ParseError
+from marketsearch.sources.facebook import (
+    FacebookSource,
+    build_item_url,
+    build_search_url,
+)
+
+
+def page(fixtures_dir: Path, name: str) -> str:
+    return (fixtures_dir / "pages" / name).read_text(encoding="utf-8")
+
+
+def source_returning(html: str, tmp_path: Path, **kwargs) -> FacebookSource:
+    return FacebookSource(
+        profile_dir=tmp_path / "profile",
+        fetch_html=lambda url: html,
+        debug_dir=tmp_path / "debug",
+        **kwargs,
+    )
+
+
+def test_build_search_url_encodes_the_query():
+    url = build_search_url("Bobcat T770", radius_miles=250)
+    assert "query=Bobcat+T770" in url or "query=Bobcat%20T770" in url
+    assert url.startswith("https://www.facebook.com/marketplace/search")
+
+
+def test_build_search_url_sorts_newest_first():
+    assert "sortBy=creation_time_descend" in build_search_url("x", radius_miles=100)
+
+
+def test_build_search_url_converts_miles_to_kilometres():
+    url = build_search_url("x", radius_miles=250)
+    assert "radiusKM=402" in url  # 250 mi -> 402 km
+
+
+def test_build_item_url():
+    assert build_item_url("1001") == "https://www.facebook.com/marketplace/item/1001/"
+
+
+def test_search_returns_parsed_listings(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "search.html"), tmp_path)
+    listings = src.search("Bobcat T770", location="Olathe, KS", radius_miles=250)
+    assert [l.listing_id for l in listings] == ["1001", "1002", "1003"]
+
+
+def test_search_returns_empty_list_for_no_results(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "empty_results.html"), tmp_path)
+    assert src.search("Bobcat T999", location="x", radius_miles=250) == []
+
+
+def test_login_wall_raises_login_required(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "login_wall.html"), tmp_path)
+    with pytest.raises(LoginRequired) as exc:
+        src.search("x", location="y", radius_miles=1)
+    assert exc.value.kind == "login"
+
+
+def test_checkpoint_raises_login_required(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "checkpoint.html"), tmp_path)
+    with pytest.raises(LoginRequired) as exc:
+        src.search("x", location="y", radius_miles=1)
+    assert exc.value.kind == "checkpoint"
+
+
+def test_login_wall_is_detected_before_parsing(fixtures_dir: Path, tmp_path: Path):
+    """A login page has no listing JSON. Without the check it would surface as
+    a misleading ParseError and trigger the wrong recovery."""
+    src = source_returning(page(fixtures_dir, "login_wall.html"), tmp_path)
+    with pytest.raises(LoginRequired):
+        src.fetch_detail("1001")
+
+
+def test_parse_failure_writes_the_page_to_the_debug_dir(tmp_path: Path):
+    src = source_returning("<html><body>totally unexpected</body></html>", tmp_path)
+    with pytest.raises(ParseError):
+        src.search("x", location="y", radius_miles=1)
+    written = list((tmp_path / "debug").glob("*.html"))
+    assert len(written) == 1
+    assert "totally unexpected" in written[0].read_text(encoding="utf-8")
+
+
+def test_fetch_detail_returns_parsed_detail(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "item.html"), tmp_path)
+    detail = src.fetch_detail("1001")
+    assert "2,400 hours" in detail.description
+    assert len(detail.photo_urls) == 2
+
+
+def test_fetch_saved_returns_ids(fixtures_dir: Path, tmp_path: Path):
+    src = source_returning(page(fixtures_dir, "saved.html"), tmp_path)
+    assert src.fetch_saved() == ["1001", "2002"]
+
+
+def test_source_is_a_context_manager(fixtures_dir: Path, tmp_path: Path):
+    with source_returning(page(fixtures_dir, "saved.html"), tmp_path) as src:
+        assert src.fetch_saved() == ["1001", "2002"]
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_facebook_source.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.sources.facebook'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/marketsearch/sources/facebook.py`:
+
+```python
+"""Playwright driver for Facebook Marketplace.
+
+The only module in the project that knows what a Facebook page looks like, and
+therefore the only one that should need changing when Facebook does.
+
+Facebook derives Marketplace location from the logged-in profile rather than a
+URL parameter that can be reliably constructed. The user sets location and
+radius by hand once during `marketsearch login`; the persistent Chrome profile
+remembers it.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+from urllib.parse import urlencode
+
+from marketsearch.models import ListingDetail, RawListing
+from marketsearch.sources.base import LoginRequired, ParseError, SourceError
+from marketsearch.sources.parse import (
+    detect_login_wall,
+    parse_item_detail,
+    parse_saved_ids,
+    parse_search_results,
+)
+
+log = logging.getLogger(__name__)
+
+SEARCH_BASE = "https://www.facebook.com/marketplace/search"
+SAVED_URL = "https://www.facebook.com/marketplace/you/saved"
+ITEM_BASE = "https://www.facebook.com/marketplace/item"
+
+# Pause between page loads within a run, so a sweep does not read as a burst.
+_MIN_PAGE_DELAY_S = 3.0
+_MAX_PAGE_DELAY_S = 8.0
+
+_PAGE_TIMEOUT_MS = 45_000
+
+
+def build_search_url(query: str, radius_miles: int) -> str:
+    params = {
+        "query": query,
+        "radiusKM": int(round(radius_miles * 1.60934)),
+        "sortBy": "creation_time_descend",
+    }
+    return f"{SEARCH_BASE}?{urlencode(params)}"
+
+
+def build_item_url(listing_id: str) -> str:
+    return f"{ITEM_BASE}/{listing_id}/"
+
+
+class FacebookSource:
+    def __init__(
+        self,
+        profile_dir: Path,
+        headless: bool = True,
+        debug_dir: Path | None = None,
+        fetch_html: Callable[[str], str] | None = None,
+    ) -> None:
+        self.profile_dir = Path(profile_dir)
+        self.headless = headless
+        self.debug_dir = Path(debug_dir) if debug_dir else None
+        self._fetch_html_override = fetch_html
+        self._playwright = None
+        self._context = None
+        self._page = None
+        self._loaded_any_page = False
+
+    # ---- lifecycle -------------------------------------------------------
+
+    def __enter__(self) -> "FacebookSource":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._context is not None:
+            self._context.close()
+            self._context = None
+        if self._playwright is not None:
+            self._playwright.stop()
+            self._playwright = None
+
+    def _ensure_browser(self) -> None:
+        if self._page is not None:
+            return
+        from playwright.sync_api import sync_playwright
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._playwright = sync_playwright().start()
+        self._context = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(self.profile_dir),
+            channel="chrome",
+            headless=self.headless,
+            viewport={"width": 1440, "height": 900},
+        )
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
+
+    # ---- page fetching ---------------------------------------------------
+
+    def _fetch(self, url: str) -> str:
+        if self._fetch_html_override is not None:
+            return self._fetch_html_override(url)
+
+        self._ensure_browser()
+        if self._loaded_any_page:
+            time.sleep(random.uniform(_MIN_PAGE_DELAY_S, _MAX_PAGE_DELAY_S))
+
+        log.debug("loading %s", url)
+        self._page.goto(url, timeout=_PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
+        self._page.wait_for_timeout(2500)  # let the JSON payload land
+        self._loaded_any_page = True
+        return self._page.content()
+
+    def _save_debug(self, label: str, html: str) -> None:
+        if self.debug_dir is None:
+            return
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        path = self.debug_dir / f"{stamp}-{label}.html"
+        path.write_text(html, encoding="utf-8")
+        log.warning("saved unparseable page to %s", path)
+
+    def _load(self, url: str, label: str) -> str:
+        """Fetch, then check for a login wall *before* attempting to parse.
+
+        A login page contains no listing JSON, so parsing it first would raise
+        a misleading ParseError and trigger the wrong recovery.
+        """
+        try:
+            html = self._fetch(url)
+        except LoginRequired:
+            raise
+        except Exception as exc:  # playwright timeouts, navigation failures
+            raise SourceError(f"failed to load {url}: {exc}") from exc
+
+        wall = detect_login_wall(html)
+        if wall is not None:
+            raise LoginRequired(wall)
+        return html
+
+    # ---- ListingSource ---------------------------------------------------
+
+    def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]:
+        url = build_search_url(query, radius_miles)
+        log.info("searching %r (location %s, %d mi)", query, location, radius_miles)
+        html = self._load(url, "search")
+        try:
+            return parse_search_results(html)
+        except ParseError:
+            self._save_debug("search", html)
+            raise
+
+    def fetch_detail(self, listing_id: str) -> ListingDetail:
+        html = self._load(build_item_url(listing_id), "item")
+        try:
+            return parse_item_detail(html, listing_id)
+        except ParseError:
+            self._save_debug(f"item-{listing_id}", html)
+            raise
+
+    def fetch_saved(self) -> list[str]:
+        html = self._load(SAVED_URL, "saved")
+        try:
+            return parse_saved_ids(html)
+        except ParseError:
+            self._save_debug("saved", html)
+            raise
+
+
+def open_login_browser(profile_dir: Path) -> None:
+    """Open a visible Chrome on the persistent profile and block until closed.
+
+    The user logs into Facebook, opens Marketplace, and sets their location and
+    search radius by hand. All of it persists in the profile directory.
+    """
+    from playwright.sync_api import sync_playwright
+
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            channel="chrome",
+            headless=False,
+            viewport={"width": 1440, "height": 900},
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto("https://www.facebook.com/marketplace/", timeout=_PAGE_TIMEOUT_MS)
+        print(
+            "\nA browser window is open.\n"
+            "  1. Log into Facebook if prompted.\n"
+            "  2. Open Marketplace and set your location and search radius.\n"
+            "  3. Close the browser window when done.\n"
+        )
+        try:
+            page.wait_for_event("close", timeout=0)
+        except Exception:
+            pass
+        context.close()
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_facebook_source.py -v`
+Expected: 13 passed
+
+- [ ] **Step 5: Install the browser binary**
+
+Run: `playwright install chromium`
+
+- [ ] **Step 6: Capture real pages and re-verify the parser**
+
+The fixtures from Task 10 are structurally faithful but synthetic. Replace them with real captures now that a browser driver exists.
+
+1. Run `python -c "from marketsearch.sources.facebook import open_login_browser; from pathlib import Path; open_login_browser(Path('chrome-profile'))"` and log in, set location and radius.
+2. Save this scratch script as `scripts/capture_pages.py`:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+from marketsearch.sources.facebook import (
+    SAVED_URL,
+    FacebookSource,
+    build_item_url,
+    build_search_url,
+)
+
+OUT = Path("tests/fixtures/pages")
+OUT.mkdir(parents=True, exist_ok=True)
+
+with FacebookSource(Path("chrome-profile"), headless=False) as src:
+    for name, url in [
+        ("real_search.html", build_search_url("Bobcat T770", 250)),
+        ("real_saved.html", SAVED_URL),
+    ]:
+        (OUT / name).write_text(src._load(url, name), encoding="utf-8")
+        print("wrote", name)
+
+    listings = src.search("Bobcat T770", "anchor", 250)
+    if listings:
+        html = src._load(build_item_url(listings[0].listing_id), "item")
+        (OUT / "real_item.html").write_text(html, encoding="utf-8")
+        print("wrote real_item.html for", listings[0].listing_id)
+```
+
+3. Run it: `python scripts/capture_pages.py`
+4. Add tests to `tests/test_parse.py` that run the same assertions against the `real_*.html` captures — at minimum: `parse_search_results` returns a non-empty list, every result has a non-empty `title` and a `listing_id` of digits, and `parse_item_detail` returns a non-empty `description`.
+5. **If those tests fail, fix `parse.py`, not the captures.** Real payload key names may differ from the synthetic fixtures; that discovery is the entire point of this step.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/marketsearch/sources/facebook.py tests/test_facebook_source.py \
+        tests/fixtures/pages scripts/capture_pages.py tests/test_parse.py
+git commit -m "feat: playwright facebook source with checkpoint detection"
+```
+
+---
+
+## Task 12: Email rendering
+
+**Files:**
+- Create: `src/marketsearch/notify/__init__.py`, `src/marketsearch/notify/render.py`
+- Test: `tests/test_render.py`
+
+**Interfaces:**
+- Consumes: `ListingRow` (Task 4), `ExtractionRow` (Task 5)
+- Produces:
+  - `MatchCard` frozen dataclass: `.listing: ListingRow`, `.extraction: ExtractionRow`, `.photos: list[bytes]`
+  - `ChangeCard` frozen dataclass: `.listing: ListingRow`, `.kind: str`, `.old_price_cents: int | None`, `.new_price_cents: int | None`
+  - `RenderedEmail` frozen dataclass: `.subject: str`, `.html: str`, `.images: list[tuple[str, bytes]]`
+  - `render_email(matches: list[MatchCard], unverified: list[MatchCard], changes: list[ChangeCard]) -> RenderedEmail`
+  - `render_sms(matches, unverified, changes) -> str`
+  - `download_photos(urls: list[str], limit: int = 3, get: Callable[[str], bytes] | None = None) -> list[bytes]`
+
+Photos are embedded as CID attachments rather than linked. Facebook's image URLs are signed and expire within days, so a linked email decays into broken-image boxes — including six months from now, when you are trying to remember what the machine looked like.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_render.py`:
+
+```python
+from __future__ import annotations
+
+import pytest
+
+from marketsearch.notify.render import (
+    ChangeCard,
+    MatchCard,
+    download_photos,
+    render_email,
+    render_sms,
+)
+from marketsearch.store import ExtractionRow, ListingRow
+
+
+def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000) -> ListingRow:
+    return ListingRow(
+        listing_id=listing_id, search_name="bobcat-t770", title=title,
+        price_cents=price_cents, location="Olathe, KS",
+        url=f"https://www.facebook.com/marketplace/item/{listing_id}/",
+        thumbnail_url=None, seller_name="Dale S", fingerprint="fp",
+        stage="matched", reject_reason=None, watched=False,
+        first_seen_at="2026-07-26T10:00:00+00:00",
+        last_seen_at="2026-07-26T10:00:00+00:00", last_change_check_at=None,
+    )
+
+
+def extraction(verdict="match", unknowns=None) -> ExtractionRow:
+    return ExtractionRow(
+        listing_id="1",
+        attributes={
+            "core": {"year": 2019, "make_model": "Bobcat T770", "engine_hours": 2400,
+                     "asking_price": 38000, "location": "Olathe, KS"},
+            "specs": {"cab_enclosed": True, "has_ac": True, "two_speed": True,
+                      "high_flow": False, "tracks_or_tires": "tracks",
+                      "undercarriage_condition": "70% remaining", "aux_hydraulics": True},
+            "condition": {"runs": True, "stated_issues": [], "recent_service": ["new filters"],
+                          "damage_notes": None, "one_owner_claim": True},
+            "deal": {"attachments": ["bucket", "forks"], "seller_type": "private",
+                     "financing_or_trade": False, "price_vs_market_note": "fair"},
+        },
+        verdict=verdict, confidence=0.9,
+        reasoning="2,400 hours is under the limit and 2-speed is confirmed.",
+        unknowns=unknowns or [], model="claude-opus-5",
+        created_at="2026-07-26T10:00:00+00:00",
+    )
+
+
+def match(photos=None) -> MatchCard:
+    return MatchCard(listing=listing(), extraction=extraction(), photos=photos or [])
+
+
+def test_subject_counts_matches():
+    email = render_email([match(), match()], [], [])
+    assert "2 new matches" in email.subject
+
+
+def test_subject_is_singular_for_one_match():
+    email = render_email([match()], [], [])
+    assert "1 new match" in email.subject
+    assert "matches" not in email.subject
+
+
+def test_subject_mentions_changes():
+    change = ChangeCard(listing=listing(), kind="price_change",
+                        old_price_cents=4_100_000, new_price_cents=3_800_000)
+    email = render_email([], [], [change])
+    assert "1 price change" in email.subject
+
+
+def test_body_shows_price_hours_and_reasoning():
+    html = render_email([match()], [], []).html
+    assert "$38,000" in html
+    assert "2,400" in html
+    assert "2-speed is confirmed" in html
+
+
+def test_body_links_to_the_listing():
+    html = render_email([match()], [], []).html
+    assert "https://www.facebook.com/marketplace/item/1/" in html
+
+
+def test_body_shows_attributes_table():
+    html = render_email([match()], [], []).html
+    for label in ("Hours", "Year", "Cab", "2-speed", "Attachments", "Seller"):
+        assert label in html
+
+
+def test_unverified_section_names_the_gap():
+    card = MatchCard(
+        listing=listing(),
+        extraction=extraction(verdict="unverifiable", unknowns=["engine_hours"]),
+        photos=[],
+    )
+    html = render_email([], [card], []).html
+    assert "Unverified" in html
+    assert "engine_hours" in html
+
+
+def test_price_drop_shows_both_prices():
+    change = ChangeCard(listing=listing(), kind="price_change",
+                        old_price_cents=4_100_000, new_price_cents=3_800_000)
+    html = render_email([], [], [change]).html
+    assert "$41,000" in html
+    assert "$38,000" in html
+
+
+def test_removed_listing_says_likely_sold():
+    change = ChangeCard(listing=listing(), kind="removed",
+                        old_price_cents=3_800_000, new_price_cents=None)
+    html = render_email([], [], [change]).html
+    assert "likely sold" in html.lower()
+
+
+def test_photos_become_cid_references():
+    email = render_email([match(photos=[b"\x89PNG-a", b"\x89PNG-b"])], [], [])
+    assert len(email.images) == 2
+    for cid, _data in email.images:
+        assert f'cid:{cid}' in email.html
+
+
+def test_photo_cids_are_unique_across_cards():
+    a = MatchCard(listing=listing("1"), extraction=extraction(), photos=[b"a"])
+    b = MatchCard(listing=listing("2"), extraction=extraction(), photos=[b"b"])
+    email = render_email([a, b], [], [])
+    cids = [cid for cid, _ in email.images]
+    assert len(set(cids)) == 2
+
+
+def test_card_without_photos_still_renders():
+    html = render_email([match(photos=[])], [], []).html
+    assert "2019 Bobcat T770" in html
+
+
+def test_html_escapes_listing_titles():
+    """A seller-controlled title must not be able to inject markup."""
+    card = MatchCard(
+        listing=listing(title='T770 <script>alert("x")</script>'),
+        extraction=extraction(), photos=[],
+    )
+    html = render_email([card], [], []).html
+    assert "<script>alert" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_sms_is_short_and_mentions_counts():
+    text = render_sms([match(), match()], [match()], [])
+    assert len(text) <= 160
+    assert "2" in text
+    assert "check email" in text.lower()
+
+
+def test_sms_mentions_changes_when_there_are_no_matches():
+    change = ChangeCard(listing=listing(), kind="price_change",
+                        old_price_cents=4_100_000, new_price_cents=3_800_000)
+    text = render_sms([], [], [change])
+    assert "1 change" in text
+
+
+def test_download_photos_respects_the_limit():
+    calls: list[str] = []
+
+    def get(url: str) -> bytes:
+        calls.append(url)
+        return b"img"
+
+    urls = [f"https://example.com/{i}.jpg" for i in range(10)]
+    assert len(download_photos(urls, limit=3, get=get)) == 3
+    assert len(calls) == 3
+
+
+def test_download_photos_skips_failures_without_raising():
+    def get(url: str) -> bytes:
+        if "bad" in url:
+            raise RuntimeError("404")
+        return b"img"
+
+    photos = download_photos(
+        ["https://example.com/bad.jpg", "https://example.com/good.jpg"], limit=3, get=get
+    )
+    assert photos == [b"img"]
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pytest tests/test_render.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'marketsearch.notify'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/marketsearch/notify/__init__.py` (empty file).
+
+Create `src/marketsearch/notify/render.py`:
+
+```python
+"""Turn verdicts and changes into one email and one short SMS.
+
+Photos are embedded as CID attachments rather than linked. Facebook's image
+URLs are signed and expire within days, so a linked email decays into broken
+image boxes — including months later, when you are trying to remember what the
+machine looked like.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass
+from typing import Callable
+
+from jinja2 import Environment, select_autoescape
+
+from marketsearch.store import ExtractionRow, ListingRow
+
+log = logging.getLogger(__name__)
+
+PHOTO_LIMIT = 3
+_PHOTO_TIMEOUT_S = 15.0
+
+
+@dataclass(frozen=True)
+class MatchCard:
+    listing: ListingRow
+    extraction: ExtractionRow
+    photos: list[bytes]
+
+
+@dataclass(frozen=True)
+class ChangeCard:
+    listing: ListingRow
+    kind: str  # "price_change" | "removed"
+    old_price_cents: int | None
+    new_price_cents: int | None
+
+
+@dataclass(frozen=True)
+class RenderedEmail:
+    subject: str
+    html: str
+    images: list[tuple[str, bytes]]
+
+
+def _dollars(cents: int | None) -> str:
+    return "—" if cents is None else f"${cents / 100:,.0f}"
+
+
+def _yes_no(value: object) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def _hours(attributes: dict) -> str:
+    hours = attributes.get("core", {}).get("engine_hours")
+    return "—" if hours is None else f"{hours:,}"
+
+
+def _attribute_rows(attributes: dict) -> list[tuple[str, str]]:
+    core = attributes.get("core", {})
+    specs = attributes.get("specs", {})
+    condition = attributes.get("condition", {})
+    deal = attributes.get("deal", {})
+    return [
+        ("Hours", _hours(attributes)),
+        ("Year", _yes_no(core.get("year"))),
+        ("Cab", _yes_no(specs.get("cab_enclosed"))),
+        ("A/C", _yes_no(specs.get("has_ac"))),
+        ("2-speed", _yes_no(specs.get("two_speed"))),
+        ("High flow", _yes_no(specs.get("high_flow"))),
+        ("Undercarriage", _yes_no(specs.get("undercarriage_condition"))),
+        ("Runs", _yes_no(condition.get("runs"))),
+        ("Issues", ", ".join(condition.get("stated_issues") or []) or "none stated"),
+        ("Attachments", ", ".join(deal.get("attachments") or []) or "none stated"),
+        ("Seller", _yes_no(deal.get("seller_type"))),
+    ]
+
+
+_TEMPLATE = """\
+<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+                   color:#1c1e21;max-width:680px;margin:0 auto;padding:16px">
+{% macro card(item) %}
+  <div style="border:1px solid #dddfe2;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h2 style="margin:0 0 4px;font-size:18px">{{ item.title }}</h2>
+    <div style="font-size:22px;font-weight:600;margin-bottom:2px">{{ item.price }}</div>
+    <div style="color:#65676b;font-size:13px;margin-bottom:12px">{{ item.location }}</div>
+    {% if item.unknowns %}
+      <div style="background:#fff3cd;border-radius:6px;padding:8px 10px;margin-bottom:12px;
+                  font-size:13px">
+        Unverified — not stated in the listing: {{ item.unknowns }}
+      </div>
+    {% endif %}
+    {% if item.cids %}
+      <div style="margin-bottom:12px">
+        {% for cid in item.cids %}
+          <img src="cid:{{ cid }}" style="max-width:200px;border-radius:6px;
+                                          margin-right:6px;vertical-align:top">
+        {% endfor %}
+      </div>
+    {% endif %}
+    <table style="border-collapse:collapse;font-size:13px;margin-bottom:12px">
+      {% for label, value in item.rows %}
+        <tr>
+          <td style="padding:3px 14px 3px 0;color:#65676b;white-space:nowrap">{{ label }}</td>
+          <td style="padding:3px 0">{{ value }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+    <div style="font-size:13px;font-style:italic;color:#65676b;margin-bottom:14px">
+      {{ item.reasoning }}
+    </div>
+    <a href="{{ item.url }}"
+       style="display:inline-block;background:#1877f2;color:#fff;text-decoration:none;
+              padding:9px 18px;border-radius:6px;font-size:14px">View on Marketplace</a>
+  </div>
+{% endmacro %}
+
+{% if matches %}
+  <h1 style="font-size:20px">{{ matches|length }} new
+    match{{ '' if matches|length == 1 else 'es' }}</h1>
+  {% for item in matches %}{{ card(item) }}{% endfor %}
+{% endif %}
+
+{% if unverified %}
+  <h1 style="font-size:20px">Unverified</h1>
+  <p style="font-size:13px;color:#65676b">
+    These cleared price and keyword filters, but the listing does not state
+    everything your criteria ask about.
+  </p>
+  {% for item in unverified %}{{ card(item) }}{% endfor %}
+{% endif %}
+
+{% if changes %}
+  <h1 style="font-size:20px">Watched listings</h1>
+  {% for change in changes %}
+    <div style="border-left:3px solid #1877f2;padding:8px 0 8px 12px;margin-bottom:14px">
+      <div style="font-weight:600">{{ change.headline }}</div>
+      <div style="font-size:13px;color:#65676b;margin-bottom:6px">{{ change.detail }}</div>
+      <a href="{{ change.url }}" style="font-size:13px;color:#1877f2">View on Marketplace</a>
+    </div>
+  {% endfor %}
+{% endif %}
+</body></html>
+"""
+
+_ENV = Environment(autoescape=select_autoescape(default=True, default_for_string=True))
+
+
+def _card_context(card: MatchCard) -> tuple[dict, list[tuple[str, bytes]]]:
+    images: list[tuple[str, bytes]] = []
+    cids: list[str] = []
+    for photo in card.photos:
+        cid = f"photo-{uuid.uuid4().hex}"
+        cids.append(cid)
+        images.append((cid, photo))
+
+    context = {
+        "title": card.listing.title,
+        "price": _dollars(card.listing.price_cents),
+        "location": card.listing.location or "location not stated",
+        "url": card.listing.url,
+        "rows": _attribute_rows(card.extraction.attributes),
+        "reasoning": card.extraction.reasoning,
+        "unknowns": ", ".join(card.extraction.unknowns) if card.extraction.unknowns else "",
+        "cids": cids,
+    }
+    return context, images
+
+
+def _change_context(change: ChangeCard) -> dict:
+    if change.kind == "removed":
+        return {
+            "headline": f"Listing removed (likely sold): {change.listing.title}",
+            "detail": f"Last seen at {_dollars(change.old_price_cents)}.",
+            "url": change.listing.url,
+        }
+    direction = "Price drop" if (
+        change.old_price_cents is not None
+        and change.new_price_cents is not None
+        and change.new_price_cents < change.old_price_cents
+    ) else "Price change"
+    return {
+        "headline": f"{direction}: {change.listing.title}",
+        "detail": f"{_dollars(change.old_price_cents)} → {_dollars(change.new_price_cents)}",
+        "url": change.listing.url,
+    }
+
+
+def _subject(n_matches: int, n_unverified: int, n_changes: int) -> str:
+    parts: list[str] = []
+    if n_matches:
+        parts.append(f"{n_matches} new match{'' if n_matches == 1 else 'es'}")
+    if n_unverified:
+        parts.append(f"{n_unverified} unverified")
+    if n_changes:
+        parts.append(f"{n_changes} price change{'' if n_changes == 1 else 's'}")
+    return "MarketSearch: " + (", ".join(parts) if parts else "nothing new")
+
+
+def render_email(
+    matches: list[MatchCard], unverified: list[MatchCard], changes: list[ChangeCard]
+) -> RenderedEmail:
+    images: list[tuple[str, bytes]] = []
+
+    match_ctx = []
+    for card in matches:
+        context, card_images = _card_context(card)
+        match_ctx.append(context)
+        images.extend(card_images)
+
+    unverified_ctx = []
+    for card in unverified:
+        context, card_images = _card_context(card)
+        unverified_ctx.append(context)
+        images.extend(card_images)
+
+    html = _ENV.from_string(_TEMPLATE).render(
+        matches=match_ctx,
+        unverified=unverified_ctx,
+        changes=[_change_context(c) for c in changes],
+    )
+    return RenderedEmail(
+        subject=_subject(len(matches), len(unverified), len(changes)),
+        html=html,
+        images=images,
+    )
+
+
+def render_sms(
+    matches: list[MatchCard], unverified: list[MatchCard], changes: list[ChangeCard]
+) -> str:
+    parts: list[str] = []
+    if matches:
+        names = sorted({c.listing.search_name for c in matches})
+        parts.append(f"{len(matches)} new match{'' if len(matches) == 1 else 'es'} "
+                     f"({', '.join(names)})")
+    if unverified:
+        parts.append(f"{len(unverified)} unverified")
+    if changes:
+        parts.append(f"{len(changes)} change{'' if len(changes) == 1 else 's'}")
+    body = ", ".join(parts) if parts else "activity"
+    return f"MarketSearch: {body} — check email."[:160]
+
+
+def download_photos(
+    urls: list[str], limit: int = PHOTO_LIMIT, get: Callable[[str], bytes] | None = None
+) -> list[bytes]:
+    """Fetch up to `limit` photos. A failure drops that photo rather than the
+    whole alert — a card without pictures still tells you what you need."""
+    if get is None:
+        import httpx
+
+        def get(url: str) -> bytes:  # type: ignore[misc]
+            response = httpx.get(url, timeout=_PHOTO_TIMEOUT_S, follow_redirects=True)
+            response.raise_for_status()
+            return response.content
+
+    photos: list[bytes] = []
+    for url in urls[:limit]:
+        try:
+            photos.append(get(url))
+        except Exception as exc:
+            log.warning("photo download failed for %s: %s", url, exc)
+    return photos
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pytest tests/test_render.py -v`
+Expected: 17 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/marketsearch/notify tests/test_render.py
+git commit -m "feat: html email rendering with inline photos and sms nudge"
+```
