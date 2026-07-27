@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Callable
+from typing import Callable, Protocol
 
 from marketsearch.config import Config, SearchConfig
 from marketsearch.extract import ExtractionError, Extractor
@@ -14,9 +14,16 @@ from marketsearch.fingerprint import fingerprint
 from marketsearch.models import ListingDetail, RawListing
 from marketsearch.notify.render import ChangeCard, MatchCard, download_photos
 from marketsearch.prefilter import prefilter
+from marketsearch.runstate import (
+    OperationalAlerts,
+    clear_needs_login,
+    needs_login,
+    set_needs_login,
+)
 from marketsearch.sources.base import (
     ListingSource,
     ListingUnavailable,
+    LoginRequired,
     ParseError,
     SourceError,
 )
@@ -378,3 +385,98 @@ class WatchSyncer:
                 cost_cents=result.cost_cents,
             )
             self._store.set_stage(listing.listing_id, "extracted")
+
+
+@dataclass(frozen=True)
+class RunReport:
+    counters: ScanCounters = field(default_factory=ScanCounters)
+    changes: int = 0
+    watch_errors: int = 0
+    notified: bool = False
+    blocked: str | None = None
+
+
+class _Dispatcher(Protocol):
+    def dispatch(self, matches, unverified, changes) -> bool: ...
+
+
+def run_once(
+    config: Config,
+    store: Store,
+    source: ListingSource,
+    extractor: Extractor,
+    dispatcher: _Dispatcher,
+    alerts: OperationalAlerts,
+    notify_operational: Callable[[str, str], None],
+    dry_run: bool = False,
+) -> RunReport:
+    """One complete sweep: scan, sync watched listings, alert.
+
+    Never touches Facebook while the account is flagged as needing attention —
+    retrying into a checkpoint is how a soft flag becomes a hard one.
+    """
+    blocked = needs_login(store)
+    if blocked is not None:
+        log.warning("account needs attention (%s); skipping run", blocked)
+        return RunReport(blocked=blocked)
+
+    run_id = None if dry_run else store.start_run()
+
+    try:
+        scan = Scanner(config, store, source, extractor, dry_run=dry_run).scan()
+        watch = WatchSyncer(config, store, source, extractor, dry_run=dry_run).sync()
+    except LoginRequired as exc:
+        if not dry_run:
+            set_needs_login(store, exc.kind)
+        if alerts.should_send("needs_login"):
+            notify_operational(
+                "MarketSearch needs you to log in again",
+                f"Facebook presented a {exc.kind}. Runs are paused until you run "
+                f"`marketsearch login` on the MarketSearch machine and complete it "
+                f"by hand.\n\nNo further scraping will be attempted until then.",
+            )
+            alerts.mark_sent("needs_login")
+        if run_id is not None:
+            store.finish_run(run_id, {"errors": 1})
+        return RunReport(blocked=exc.kind)
+    except ParseError as exc:
+        if alerts.should_send("parse_failure"):
+            notify_operational(
+                "MarketSearch could not parse a Facebook page",
+                f"{exc}\n\nThe offending page was saved to the debug folder. "
+                f"Runs continue, but results may be incomplete until the parser "
+                f"is updated.",
+            )
+            alerts.mark_sent("parse_failure")
+        if run_id is not None:
+            store.finish_run(run_id, {"errors": 1})
+        return RunReport(counters=ScanCounters(errors=1))
+
+    if alerts.clear("parse_failure"):
+        notify_operational(
+            "MarketSearch is back to normal",
+            "Page parsing succeeded again. No action needed.",
+        )
+    if clear_needs_login(store) or alerts.clear("needs_login"):
+        notify_operational(
+            "MarketSearch is back to normal",
+            "The Facebook session is working again. No action needed.",
+        )
+
+    notified = False
+    if not dry_run:
+        notified = dispatcher.dispatch(scan.matches, scan.unverified, watch.changes)
+
+    counters = scan.counters
+    counters.errors += watch.errors
+    if run_id is not None:
+        store.finish_run(run_id, counters.as_dict())
+
+    log.info(
+        "run complete: %d found, %d new, %d matched, %d change(s), %d error(s)",
+        counters.found, counters.new, counters.matched, len(watch.changes), counters.errors,
+    )
+    return RunReport(
+        counters=counters, changes=len(watch.changes),
+        watch_errors=watch.errors, notified=notified,
+    )
