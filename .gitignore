@@ -1,0 +1,14 @@
+.env
+*.db
+*.db-journal
+chrome-profile/
+debug/
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Tooling scratch (machine-local, not part of the project)
+.claude/worktrees/
+.claude/settings.local.json
+.superpowers/
