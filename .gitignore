@@ -6,6 +6,7 @@ chrome-profile/
 debug/
 logs/
 preview.html
+listings-review.md
 marketsearch.lock
 __pycache__/
 *.egg-info/
