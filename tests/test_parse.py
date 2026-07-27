@@ -121,6 +121,35 @@ def test_detect_login_wall_returns_none_for_a_normal_page(fixtures_dir: Path):
     assert detect_login_wall(page(fixtures_dir, "search.html")) is None
 
 
+def test_facebooks_routing_table_is_not_mistaken_for_a_checkpoint():
+    """Every real Facebook page embeds a URL routing table naming the checkpoint
+    and login endpoints. Matching those substrings made the tool declare the
+    account checkpointed on ordinary search results and pause every run.
+
+    Verbatim from a live Marketplace search page.
+    """
+    html = (
+        '<!DOCTYPE html><html id="facebook"><head><title>Facebook</title></head>'
+        "<body><div>Marketplace results</div>"
+        '<script type="application/json">{"routes":'
+        '{"\\/ajax\\/dtsg\\/":1,"\\/checkpoint\\/block\\/":1,"\\/exitdsite":1,'
+        '"\\/login\\/device-based\\/regular\\/login\\/":1,"name=\\"pass\\"":1}}'
+        "</script></body></html>"
+    )
+    assert detect_login_wall(html) is None
+
+
+def test_a_checkpoint_is_still_detected_when_the_page_also_has_scripts():
+    """Stripping scripts must not blind the detector to a genuine interstitial."""
+    html = (
+        "<html><body>"
+        '<script type="application/json">{"routes":{"\\/checkpoint\\/block\\/":1}}</script>'
+        "<div>We need to confirm it's you before you continue.</div>"
+        "</body></html>"
+    )
+    assert detect_login_wall(html) == "checkpoint"
+
+
 def test_detect_unavailable(fixtures_dir: Path):
     from marketsearch.sources.parse import detect_unavailable
     assert detect_unavailable(page(fixtures_dir, "unavailable.html")) is True

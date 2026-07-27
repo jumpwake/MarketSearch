@@ -23,8 +23,15 @@ _SCRIPT_JSON = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_SCRIPT_OR_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+
 _LOGIN_MARKERS = ('name="pass"', 'action="/login/', "login_form")
-_CHECKPOINT_MARKERS = ("checkpoint", "confirm it's you", "security check")
+
+# Markers must be phrases a human would *see* on a real interstitial. A bare
+# "checkpoint" substring is not usable: Facebook embeds a URL routing table
+# containing "\/checkpoint\/block\/" in the script payload of every page, so it
+# matched on ordinary Marketplace results and paused every run.
+_CHECKPOINT_MARKERS = ("confirm it's you", "security check", 'id="checkpoint"')
 
 ITEM_URL = "https://www.facebook.com/marketplace/item/{listing_id}/"
 
@@ -223,13 +230,23 @@ def detect_unavailable(html: str) -> bool:
     return any(marker in lowered for marker in _UNAVAILABLE_MARKERS)
 
 
+def strip_scripts(html: str) -> str:
+    """Drop <script> and <style> bodies.
+
+    Interstitial detection must read only what a human would see. Facebook ships
+    a URL routing table inside its script payloads that mentions login and
+    checkpoint endpoints on every page, including ordinary search results.
+    """
+    return _SCRIPT_OR_STYLE.sub(" ", html)
+
+
 def detect_login_wall(html: str) -> str | None:
     """Return 'login', 'checkpoint', or None.
 
     Checked before parsing on every page. A non-None result must stop the run
     immediately — never retry into a checkpoint.
     """
-    lowered = html.lower()
+    lowered = strip_scripts(html).lower()
     if any(marker in lowered for marker in _CHECKPOINT_MARKERS):
         return "checkpoint"
     if any(marker.lower() in lowered for marker in _LOGIN_MARKERS):
