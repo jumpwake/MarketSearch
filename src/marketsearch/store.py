@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS listings (
     watched        INTEGER NOT NULL DEFAULT 0,
     first_seen_at  TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
-    last_change_check_at TEXT
+    last_change_check_at TEXT,
+    extraction_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_listings_fingerprint ON listings(fingerprint);
@@ -122,6 +123,7 @@ class ListingRow:
     first_seen_at: str
     last_seen_at: str
     last_change_check_at: str | None
+    extraction_attempts: int
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,7 @@ def _row_to_listing(row: sqlite3.Row) -> ListingRow:
         first_seen_at=row["first_seen_at"],
         last_seen_at=row["last_seen_at"],
         last_change_check_at=row["last_change_check_at"],
+        extraction_attempts=row["extraction_attempts"],
     )
 
 
@@ -237,6 +240,39 @@ class Store:
             (price_cents, utcnow(), listing_id),
         )
         self._conn.commit()
+
+    def bump_attempts(self, listing_id: str) -> int:
+        self._conn.execute(
+            "UPDATE listings SET extraction_attempts = extraction_attempts + 1"
+            " WHERE listing_id = ?",
+            (listing_id,),
+        )
+        self._conn.commit()
+        return self.attempts(listing_id)
+
+    def attempts(self, listing_id: str) -> int:
+        cur = self._conn.execute(
+            "SELECT extraction_attempts FROM listings WHERE listing_id = ?", (listing_id,)
+        )
+        row = cur.fetchone()
+        return int(row["extraction_attempts"]) if row else 0
+
+    def pending_listings(self, search_name: str) -> list[RawListing]:
+        """Listings awaiting a retry. Excludes 'failed', so a listing that has
+        exhausted its attempts is never picked up again."""
+        cur = self._conn.execute(
+            "SELECT * FROM listings WHERE search_name = ? AND stage = 'pending'",
+            (search_name,),
+        )
+        return [
+            RawListing(
+                listing_id=row["listing_id"], title=row["title"],
+                price_cents=row["price_cents"], location=row["location"],
+                url=row["url"], thumbnail_url=row["thumbnail_url"],
+                seller_name=row["seller_name"],
+            )
+            for row in cur.fetchall()
+        ]
 
     def get_listing(self, listing_id: str) -> ListingRow | None:
         cur = self._conn.execute("SELECT * FROM listings WHERE listing_id = ?", (listing_id,))

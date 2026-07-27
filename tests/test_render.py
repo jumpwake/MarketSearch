@@ -25,6 +25,7 @@ def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000) -> 
         stage="matched", reject_reason=None, watched=False,
         first_seen_at="2026-07-26T10:00:00+00:00",
         last_seen_at="2026-07-26T10:00:00+00:00", last_change_check_at=None,
+        extraction_attempts=0,
     )
 
 

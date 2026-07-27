@@ -143,6 +143,7 @@ def listing_row(listing_id="1") -> ListingRow:
         thumbnail_url=None, seller_name="Dale S", fingerprint="fp", stage="matched",
         reject_reason=None, watched=False, first_seen_at="2026-07-26T10:00:00+00:00",
         last_seen_at="2026-07-26T10:00:00+00:00", last_change_check_at=None,
+        extraction_attempts=0,
     )
 
 
