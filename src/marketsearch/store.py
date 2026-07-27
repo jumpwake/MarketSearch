@@ -102,8 +102,25 @@ CREATE TABLE IF NOT EXISTS app_state (
 """
 
 
+_last_now = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """A UTC timestamp that is always strictly greater than the previous one.
+
+    Windows' clock granularity is around 15 ms — coarse enough that a whole run
+    (start, extract, finish) can share a single tick. Several queries here
+    compare ISO timestamps as ordered strings, and a run whose start and end
+    are equal produces a zero-width window that wrongly captures a neighbouring
+    run's rows. Nudging forward by a microsecond keeps event order well defined
+    without depending on how fine the platform clock happens to be.
+    """
+    global _last_now
+    now = datetime.now(timezone.utc)
+    if now <= _last_now:
+        now = _last_now + timedelta(microseconds=1)
+    _last_now = now
+    return now.isoformat()
 
 
 @dataclass(frozen=True)
