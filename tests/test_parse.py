@@ -121,6 +121,12 @@ def test_detect_login_wall_returns_none_for_a_normal_page(fixtures_dir: Path):
     assert detect_login_wall(page(fixtures_dir, "search.html")) is None
 
 
+def test_detect_unavailable(fixtures_dir: Path):
+    from marketsearch.sources.parse import detect_unavailable
+    assert detect_unavailable(page(fixtures_dir, "unavailable.html")) is True
+    assert detect_unavailable(page(fixtures_dir, "item.html")) is False
+
+
 # ---- captured real pages ------------------------------------------------
 # These skip when the captures are absent, so CI on a fresh clone still passes.
 # Run scripts/capture_pages.py to produce them.

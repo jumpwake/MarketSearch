@@ -209,6 +209,20 @@ def parse_item_detail(html: str, listing_id: str) -> ListingDetail:
     )
 
 
+_UNAVAILABLE_MARKERS = (
+    "this listing isn't available",
+    "this listing is no longer available",
+    "content isn't available",
+    "sorry, this content isn't available",
+)
+
+
+def detect_unavailable(html: str) -> bool:
+    """True when Facebook says the listing is gone."""
+    lowered = html.lower()
+    return any(marker in lowered for marker in _UNAVAILABLE_MARKERS)
+
+
 def detect_login_wall(html: str) -> str | None:
     """Return 'login', 'checkpoint', or None.
 

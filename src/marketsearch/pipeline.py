@@ -12,9 +12,14 @@ from marketsearch.config import Config, SearchConfig
 from marketsearch.extract import ExtractionError, Extractor
 from marketsearch.fingerprint import fingerprint
 from marketsearch.models import ListingDetail, RawListing
-from marketsearch.notify.render import MatchCard, download_photos
+from marketsearch.notify.render import ChangeCard, MatchCard, download_photos
 from marketsearch.prefilter import prefilter
-from marketsearch.sources.base import ListingSource, ParseError, SourceError
+from marketsearch.sources.base import (
+    ListingSource,
+    ListingUnavailable,
+    ParseError,
+    SourceError,
+)
 from marketsearch.store import ExtractionRow, ListingRow, Store, utcnow
 
 log = logging.getLogger(__name__)
@@ -240,3 +245,136 @@ class Scanner:
             )
 
         return 1
+
+
+@dataclass(frozen=True)
+class WatchOutcome:
+    changes: list[ChangeCard] = field(default_factory=list)
+    errors: int = 0
+
+
+class WatchSyncer:
+    """Mirror Facebook's saved list and report what changed.
+
+    Facebook's saved list is the source of truth; the database mirrors it. That
+    is what makes un-saving the unfollow, with no separate state to reconcile.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        source: ListingSource,
+        extractor: Extractor,
+        dry_run: bool = False,
+    ) -> None:
+        self._config = config
+        self._store = store
+        self._source = source
+        self._extractor = extractor
+        self._dry_run = dry_run
+
+    def _search_for(self, title: str) -> SearchConfig:
+        """Pick the search whose title filters this listing satisfies.
+
+        A machine saved while browsing may not belong to any configured search;
+        the first search's criteria are a reasonable default and the alert
+        still carries the full attribute table.
+        """
+        lowered = title.lower()
+        for search in self._config.searches:
+            if search.title_must_match and all(t in lowered for t in search.title_must_match):
+                return search
+        return self._config.searches[0]
+
+    def sync(self) -> WatchOutcome:
+        saved = self._source.fetch_saved()
+        log.info("%d saved listing(s) on facebook", len(saved))
+
+        changes: list[ChangeCard] = []
+        errors = 0
+
+        for listing in saved:
+            try:
+                change = self._check(listing)
+            except (ParseError, SourceError) as exc:
+                log.warning("watched check failed for %s: %s", listing.listing_id, exc)
+                errors += 1
+                continue
+            if change is not None:
+                changes.append(change)
+
+        if not self._dry_run:
+            self._store.set_watched_ids({l.listing_id for l in saved})
+
+        return WatchOutcome(changes=changes, errors=errors)
+
+    def _check(self, listing: RawListing) -> ChangeCard | None:
+        known = self._store.get_listing(listing.listing_id)
+
+        if known is None:
+            self._baseline(listing)
+            return None
+
+        try:
+            detail = self._source.fetch_detail(listing.listing_id)
+        except ListingUnavailable:
+            return ChangeCard(
+                listing=known, kind="removed",
+                old_price_cents=known.price_cents, new_price_cents=None,
+            )
+
+        if known.price_cents != listing.price_cents:
+            if not self._dry_run:
+                self._store.update_price(listing.listing_id, listing.price_cents)
+                self._store.save_detail(detail, content_hash(detail))
+            return ChangeCard(
+                listing=known, kind="price_change",
+                old_price_cents=known.price_cents, new_price_cents=listing.price_cents,
+            )
+
+        new_hash = content_hash(detail)
+        if new_hash != self._store.get_detail_content_hash(listing.listing_id):
+            if not self._dry_run:
+                self._store.save_detail(detail, new_hash)
+            return ChangeCard(
+                listing=known, kind="description_change",
+                old_price_cents=known.price_cents, new_price_cents=listing.price_cents,
+            )
+
+        return None
+
+    def _baseline(self, listing: RawListing) -> None:
+        """First sight of a listing saved while browsing. Establish a record so
+        later runs have something to diff against."""
+        search = self._search_for(listing.title)
+        fp = fingerprint(
+            listing.title, listing.price_cents, listing.seller_name, listing.location
+        )
+        if not self._dry_run:
+            self._store.upsert_listing(listing, search.name, fp)
+
+        detail = self._source.fetch_detail(listing.listing_id)
+        if not self._dry_run:
+            self._store.save_detail(detail, content_hash(detail))
+
+        try:
+            result = self._extractor.extract(listing, detail, search.criteria)
+        except ExtractionError as exc:
+            log.warning("baseline extraction failed for %s: %s", listing.listing_id, exc)
+            return
+
+        if not self._dry_run:
+            extraction = result.extraction
+            self._store.save_extraction(
+                listing_id=listing.listing_id,
+                attributes=extraction.model_dump(
+                    include={"core", "specs", "condition", "deal"}
+                ),
+                verdict=extraction.verdict, confidence=extraction.confidence,
+                reasoning=extraction.reasoning, unknowns=extraction.unknowns,
+                model=self._config.extraction.model,
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                cost_cents=result.cost_cents,
+            )
+            self._store.set_stage(listing.listing_id, "extracted")

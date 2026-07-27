@@ -34,6 +34,14 @@ class ParseError(SourceError):
     """
 
 
+class ListingUnavailable(SourceError):
+    """The listing page loaded but the listing is gone — sold or withdrawn.
+
+    Deliberately distinct from ParseError. Reporting a markup change as
+    'likely sold' would be a confident lie about a machine still for sale.
+    """
+
+
 class ListingSource(Protocol):
     def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]: ...
     def fetch_detail(self, listing_id: str) -> ListingDetail: ...

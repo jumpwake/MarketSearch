@@ -20,9 +20,15 @@ from typing import Callable
 from urllib.parse import urlencode
 
 from marketsearch.models import ListingDetail, RawListing
-from marketsearch.sources.base import LoginRequired, ParseError, SourceError
+from marketsearch.sources.base import (
+    ListingUnavailable,
+    LoginRequired,
+    ParseError,
+    SourceError,
+)
 from marketsearch.sources.parse import (
     detect_login_wall,
+    detect_unavailable,
     parse_item_detail,
     parse_saved_listings,
     parse_search_results,
@@ -161,6 +167,8 @@ class FacebookSource:
 
     def fetch_detail(self, listing_id: str) -> ListingDetail:
         html = self._load(build_item_url(listing_id), "item")
+        if detect_unavailable(html):
+            raise ListingUnavailable(f"listing {listing_id} is no longer available")
         try:
             return parse_item_detail(html, listing_id)
         except ParseError:
