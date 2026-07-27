@@ -119,3 +119,44 @@ def test_detect_checkpoint(fixtures_dir: Path):
 
 def test_detect_login_wall_returns_none_for_a_normal_page(fixtures_dir: Path):
     assert detect_login_wall(page(fixtures_dir, "search.html")) is None
+
+
+# ---- captured real pages ------------------------------------------------
+# These skip when the captures are absent, so CI on a fresh clone still passes.
+# Run scripts/capture_pages.py to produce them.
+
+
+def real_page(fixtures_dir: Path, name: str) -> str:
+    path = fixtures_dir / "pages" / name
+    if not path.exists():
+        pytest.skip(f"{name} not captured yet — run scripts/capture_pages.py")
+    return path.read_text(encoding="utf-8")
+
+
+def test_real_search_page_parses(fixtures_dir: Path):
+    listings = parse_search_results(real_page(fixtures_dir, "real_search.html"))
+    assert listings, "captured search page produced zero listings"
+    for listing in listings:
+        assert listing.listing_id.isdigit(), listing.listing_id
+        assert listing.title.strip()
+        assert listing.url.endswith(f"/{listing.listing_id}/")
+
+
+def test_real_search_page_yields_some_prices(fixtures_dir: Path):
+    """Not every listing has a price, but a whole page without one means the
+    price key moved."""
+    listings = parse_search_results(real_page(fixtures_dir, "real_search.html"))
+    assert any(l.price_cents is not None for l in listings)
+
+
+def test_real_item_page_parses(fixtures_dir: Path):
+    html = real_page(fixtures_dir, "real_item.html")
+    listing_id = parse_search_results(html)[0].listing_id
+    detail = parse_item_detail(html, listing_id)
+    assert detail.description.strip(), "captured item page produced no description"
+
+
+def test_real_saved_page_parses(fixtures_dir: Path):
+    saved = parse_saved_listings(real_page(fixtures_dir, "real_saved.html"))
+    for listing in saved:
+        assert listing.listing_id.isdigit()
