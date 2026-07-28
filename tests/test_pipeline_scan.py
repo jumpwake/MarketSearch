@@ -22,22 +22,18 @@ CONFIG_DICT = {
         "sms": {"to": "+1", "twilio_from": "+2", "account_sid_env": "S",
                 "auth_token_env": "T"},
     },
-    "searches": [{
-        "name": "bobcat-t770", "query": "Bobcat T770",
-        "price_min_cents": 1_500_000, "price_max_cents": 6_000_000,
-        "title_must_match": ["t770"], "title_must_not_match": ["wanted"],
-        "on_unknown": "alert", "criteria": "Under 3000 engine hours.",
-    }],
 }
 
 
 def config(**overrides) -> Config:
+    """Everything but a catalog. `load_config` rejects this shape; it exists to
+    exercise the code paths that must survive a Config with no watchlists."""
     data = {**CONFIG_DICT, **overrides}
     return Config.model_validate(data)
 
 
 WATCHLIST_DICT = {
-    **{k: v for k, v in CONFIG_DICT.items() if k != "searches"},
+    **CONFIG_DICT,
     "watchlists": [
         {
             "name": "track-loaders",

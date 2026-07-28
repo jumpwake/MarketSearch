@@ -32,13 +32,14 @@ notifications:
     account_sid_env: TWILIO_ACCOUNT_SID
     auth_token_env: TWILIO_AUTH_TOKEN
 
-searches:
-  - name: bobcat-t770
-    query: "Bobcat T770"
-    price: {min: 15000, max: 50000}
-    title_must_match: ["t770"]
-    title_must_not_match: ["wanted", "parts only"]
+watchlists:
+  - name: track-loaders
+    exclude: ["wanted", "parts only"]
     on_unknown: alert
     criteria: |
       Under 3000 engine hours.
       Reject anything describing major engine or hydraulic problems.
+    queries:
+      - "Bobcat T770"
+    models:
+      - {name: bobcat-t770, keywords: ["t770"], price: {min: 15000, max: 50000}}

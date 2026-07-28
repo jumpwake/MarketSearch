@@ -26,7 +26,7 @@ def _stranded(store: Store) -> str:
         price_cents=4_200_000, location="Cameron, Missouri",
         url="https://example.com/x", thumbnail_url=None, seller_name=None,
     )
-    store.upsert_listing(listing, "bobcat-t86", "fp",
+    store.upsert_listing(listing, "fp",
                          watchlist_name="track-loaders", model_name="bobcat-t86")
     store.set_stage(listing.listing_id, "prefiltered_out",
                     "title matched none of: 't86', 't-86', 't 86'")
@@ -52,7 +52,7 @@ def test_requeue_leaves_genuinely_rejected_listings_alone(store: Store):
         location="Peoria, Illinois", url="https://example.com/j",
         thumbnail_url=None, seller_name=None,
     )
-    store.upsert_listing(junk, "bobcat-t770", "fp2")
+    store.upsert_listing(junk, "fp2")
     store.set_stage("junk", "prefiltered_out", "matched no watched model")
 
     assert requeue(store, watchlist_config()) == []

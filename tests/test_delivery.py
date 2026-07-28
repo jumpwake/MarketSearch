@@ -137,7 +137,7 @@ def test_sms_sender_sends_body_from_and_to():
 
 def listing_row(listing_id="1") -> ListingRow:
     return ListingRow(
-        listing_id=listing_id, search_name="bobcat-t770", title="2019 Bobcat T770",
+        listing_id=listing_id, title="2019 Bobcat T770",
         price_cents=3_800_000, location="Olathe, KS",
         url=f"https://www.facebook.com/marketplace/item/{listing_id}/",
         thumbnail_url=None, seller_name="Dale S", fingerprint="fp", stage="matched",

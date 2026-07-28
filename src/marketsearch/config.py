@@ -68,24 +68,6 @@ class NotificationConfig(BaseModel):
     sms: SmsConfig
 
 
-class SearchConfig(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    query: str
-    price_min_cents: int
-    price_max_cents: int
-    title_must_match: list[str] = []
-    title_must_not_match: list[str] = []
-    on_unknown: Literal["alert", "skip"] = "alert"
-    criteria: str
-
-    @field_validator("title_must_match", "title_must_not_match")
-    @classmethod
-    def _lowercase(cls, values: list[str]) -> list[str]:
-        return [v.strip().lower() for v in values]
-
-
 class ModelConfig(BaseModel):
     """One machine or attachment the user watches, with its own price band."""
 
@@ -133,19 +115,7 @@ class Config(BaseModel):
     schedule: ScheduleConfig = ScheduleConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     notifications: NotificationConfig
-    searches: list[SearchConfig] = []
     watchlists: list[WatchlistConfig] = []
-
-
-def _normalise_search(raw: dict[str, Any]) -> dict[str, Any]:
-    """Convert the human-friendly YAML shape into SearchConfig's field names."""
-    out = dict(raw)
-    price = out.pop("price", None) or {}
-    if "min" not in price or "max" not in price:
-        raise ConfigError(f"search '{out.get('name')}' needs price.min and price.max")
-    out["price_min_cents"] = int(round(float(price["min"]) * 100))
-    out["price_max_cents"] = int(round(float(price["max"]) * 100))
-    return out
 
 
 def _normalise_watchlist(raw: dict[str, Any]) -> dict[str, Any]:
@@ -189,16 +159,10 @@ def load_config(path: Path) -> Config:
         raise ConfigError("config file must contain a YAML mapping at the top level")
 
     raw = dict(raw)
-    raw["searches"] = [_normalise_search(s) for s in raw.get("searches") or []]
     raw["watchlists"] = [_normalise_watchlist(w) for w in raw.get("watchlists") or []]
 
-    if not raw["searches"] and not raw["watchlists"]:
-        raise ConfigError("config must define at least one search or watchlist")
-
-    names = [s["name"] for s in raw["searches"]]
-    duplicates = {n for n in names if names.count(n) > 1}
-    if duplicates:
-        raise ConfigError(f"duplicate search name(s): {', '.join(sorted(duplicates))}")
+    if not raw["watchlists"]:
+        raise ConfigError("config must define at least one watchlist")
 
     watchlist_names = [w["name"] for w in raw["watchlists"]]
     duplicates = {n for n in watchlist_names if watchlist_names.count(n) > 1}

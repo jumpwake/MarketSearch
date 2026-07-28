@@ -36,7 +36,7 @@ def build(db_path: Path, config_path: Path) -> str:
     ).fetchall()
     extractions = {r["listing_id"]: r for r in conn.execute("select * from extractions")}
     spend = conn.execute("select coalesce(sum(cost_cents),0) from extractions").fetchone()[0]
-    searches = {s.name: s for s in cfg.searches}
+    catalog = [(w, m) for w in cfg.watchlists for m in w.models]
 
     out: list[str] = [
         "# Listings review — MarketSearch",
@@ -84,7 +84,7 @@ def build(db_path: Path, config_path: Path) -> str:
             f"### [{r['title']}]({url})",
             "",
             f"- **Price:** {money(r['price_cents'])}",
-            f"- **Search:** `{r['search_name']}` · **Listing ID:** `{r['listing_id']}`",
+            f"- **Model:** `{r['model_name']}` · **Listing ID:** `{r['listing_id']}`",
         ]
         if e is None:
             out += ["- _No extraction row._", ""]
@@ -124,65 +124,83 @@ def build(db_path: Path, config_path: Path) -> str:
         "",
     ]
 
-    for name, search in searches.items():
-        rows = conn.execute(
-            "select * from listings where search_name=? and stage='prefiltered_out' "
-            "order by price_cents desc",
-            (name,),
-        ).fetchall()
-        kept = conn.execute(
-            "select count(*) from listings where search_name=? and stage!='prefiltered_out'",
-            (name,),
-        ).fetchone()[0]
-        out += [
-            f"### `{name}` — query `{search.query}`",
-            "",
-            f"- **Price band:** {money(search.price_min_cents)} – "
-            f"{money(search.price_max_cents)}",
-            f"- **Must match:** `{list(search.title_must_match)}` · "
-            f"**Must not match:** `{list(search.title_must_not_match)}`",
-            f"- **{kept} kept, {len(rows)} dropped**",
-            "",
-        ]
+    def dropped_table(rows) -> list[str]:
         if not rows:
-            out += ["_Nothing dropped._", ""]
-            continue
-        out += ["| Price | Title | Dropped because |", "|---|---|---|"]
+            return ["_Nothing dropped._", ""]
+        lines = ["| Price | Title | Dropped because |", "|---|---|---|"]
         for r in rows:
             url = r["url"] or ITEM_URL.format(listing_id=r["listing_id"])
             title = (r["title"] or "").replace("|", "\\|")
-            out.append(
+            lines.append(
                 f"| {money(r['price_cents'])} | [{title}]({url}) | {r['reject_reason']} |"
             )
-        out.append("")
+        lines.append("")
+        return lines
 
-    # The check that matters: did the title filter throw away a real match?
+    for watchlist, model in catalog:
+        rows = conn.execute(
+            "select * from listings where model_name=? and stage='prefiltered_out' "
+            "order by price_cents desc",
+            (model.name,),
+        ).fetchall()
+        kept = conn.execute(
+            "select count(*) from listings where model_name=? and stage!='prefiltered_out'",
+            (model.name,),
+        ).fetchone()[0]
+        out += [
+            f"### `{model.name}` — watchlist `{watchlist.name}`",
+            "",
+            f"- **Price band:** {money(model.price_min_cents)} – "
+            f"{money(model.price_max_cents)}",
+            f"- **Keywords:** `{list(model.keywords)}` · "
+            f"**Excluded:** `{list(watchlist.exclude)}`",
+            f"- **{kept} kept, {len(rows)} dropped**",
+            "",
+        ]
+        out += dropped_table(rows)
+
+    unassigned = conn.execute(
+        "select * from listings where model_name is null and stage='prefiltered_out' "
+        "order by price_cents desc"
+    ).fetchall()
+    out += [
+        "### Matched no model at all",
+        "",
+        "Pooled from some query, offered to every model, accepted by none.",
+        f"**{len(unassigned)} dropped.**",
+        "",
+    ]
+    out += dropped_table(unassigned)
+
+    # The check that matters: did the catalog throw away a real match? Under
+    # pooling a dropped listing belongs to no model, so scan every dropped row
+    # for every model's number rather than scoping by the row's label.
     out += ["---", "", "## Near-miss check", "", ""]
+    all_dropped = conn.execute(
+        "select title,price_cents,reject_reason,model_name from listings "
+        "where stage='prefiltered_out'"
+    ).fetchall()
     any_near = False
-    for name, search in searches.items():
+    for _watchlist, model in catalog:
         numbers = sorted({
-            digits for token in search.title_must_match
-            if (digits := "".join(ch for ch in token if ch.isdigit()))
+            digits for keyword in model.keywords
+            if (digits := "".join(ch for ch in keyword if ch.isdigit()))
         })
         if not numbers:
             continue
-        rows = conn.execute(
-            "select title,price_cents,reject_reason from listings "
-            "where search_name=? and stage='prefiltered_out'",
-            (name,),
-        ).fetchall()
-        # One entry per listing, not per token — the same machine matching six
-        # spellings of one model number is one near-miss, not six.
+        # One entry per listing, not per keyword — the same machine matching
+        # six spellings of one model number is one near-miss, not six.
         near = [
-            r for r in rows
-            if any(d in (r["title"] or "").lower() for d in numbers)
+            r for r in all_dropped
+            if r["model_name"] != model.name
+            and any(d in (r["title"] or "").lower() for d in numbers)
         ]
         if near:
             any_near = True
             out += [
-                f"**`{name}`: {len(near)} dropped listing(s) mention "
-                f"{' or '.join(f'`{d}`' for d in numbers)} but matched none of "
-                f"`{list(search.title_must_match)}`** — the filter may be too strict:",
+                f"**`{model.name}`: {len(near)} dropped listing(s) mention "
+                f"{' or '.join(f'`{d}`' for d in numbers)} but were not kept as "
+                f"`{model.name}`** — the catalog may be too strict:",
                 "",
             ]
             for r in near:
@@ -193,8 +211,8 @@ def build(db_path: Path, config_path: Path) -> str:
             out.append("")
     if not any_near:
         out += [
-            "No dropped listing contained the model number from `title_must_match`, so",
-            "nothing real was filtered out. The title filter is precise.",
+            "No dropped listing contained a model number from any model's `keywords`,",
+            "so nothing real was filtered out. The catalog is precise.",
             "",
         ]
 
@@ -213,8 +231,10 @@ def build(db_path: Path, config_path: Path) -> str:
         "It prints which verdicts moved and why. Add `--save` to persist them.",
         "To see the email these would produce: `marketsearch preview`.",
         "",
-        "Adjusting `price`, `title_must_match`, or `title_must_not_match` changes what",
-        "gets extracted on the *next* sweep — re-run this report afterwards to compare.",
+        "Adjusting a model's `price`, its `keywords`, or the watchlist's `exclude`",
+        "changes what gets extracted on the *next* sweep. `marketsearch requeue` also",
+        "re-tests everything already dropped against the edited catalog, with no",
+        "scraping — re-run this report afterwards to compare.",
         "",
     ]
     return "\n".join(out)

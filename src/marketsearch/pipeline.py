@@ -75,7 +75,7 @@ def listing_row_from(
     """
     now = utcnow()
     return ListingRow(
-        listing_id=listing.listing_id, search_name=model_name,
+        listing_id=listing.listing_id,
         watchlist_name=watchlist_name, model_name=model_name,
         title=listing.title,
         price_cents=listing.price_cents, location=listing.location, url=listing.url,
@@ -181,7 +181,7 @@ class Scanner:
 
         if isinstance(decision, Rejection):
             if not self._dry_run:
-                self._store.upsert_listing(listing, "", fp)
+                self._store.upsert_listing(listing, fp)
             counters.prefiltered += 1
             self._set_stage(listing.listing_id, "prefiltered_out", decision.reason)
             return 0
@@ -189,7 +189,7 @@ class Scanner:
         watchlist, model = decision.watchlist, decision.model
         if not self._dry_run:
             self._store.upsert_listing(
-                listing, model.name, fp,
+                listing, fp,
                 watchlist_name=watchlist.name, model_name=model.name,
             )
             # upsert leaves an existing row's assignment alone; a listing whose
@@ -314,8 +314,8 @@ class WatchSyncer:
         A machine saved while browsing may match no catalog at all; the first
         watchlist's criteria are a reasonable default and the alert still
         carries the full attribute table. `None` means there is no catalog to
-        fall back to at all — a searches-only config, mid-migration (Tasks
-        4-6) — and the caller must skip rather than guess.
+        fall back to at all, which `load_config` forbids but a hand-built
+        Config allows — the caller must skip rather than guess.
         """
         if not self._config.watchlists:
             return None
@@ -399,7 +399,7 @@ class WatchSyncer:
         )
         if not self._dry_run:
             self._store.upsert_listing(
-                listing, model_name, fp,
+                listing, fp,
                 watchlist_name=watchlist.name, model_name=model_name or None,
             )
 

@@ -313,3 +313,10 @@ def requeue_command(
         rows = run_requeue(store, cfg, dry_run=dry_run)
 
     typer.echo(format_requeue(rows, dry_run))
+
+
+# Without this, `python -m marketsearch.cli <command>` imports the module and
+# exits silently — no output, exit code 0, nothing run. Every documented
+# invocation of that form was a no-op.
+if __name__ == "__main__":
+    app()

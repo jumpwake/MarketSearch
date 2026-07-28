@@ -144,14 +144,14 @@ def replay(
     return rows
 
 
-def format_replay(rows: list[ReplayRow], search_name: str) -> str:
+def format_replay(rows: list[ReplayRow], model_name: str) -> str:
     if not rows:
-        return f"{search_name} — nothing to replay in that window."
+        return f"{model_name} — nothing to replay in that window."
 
     def count(verdict: str, key) -> int:
         return sum(1 for r in rows if key(r) == verdict)
 
-    lines = [f"{search_name} — {len(rows)} listings replayed", ""]
+    lines = [f"{model_name} — {len(rows)} listings replayed", ""]
     for verdict in ("match", "unverifiable", "no_match"):
         new = count(verdict, lambda r: r.new_verdict)
         old = count(verdict, lambda r: r.old_verdict)

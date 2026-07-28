@@ -17,14 +17,13 @@ from typing import Iterable
 
 from marketsearch.models import ListingDetail, RawListing
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS listings (
     listing_id     TEXT PRIMARY KEY,
-    search_name    TEXT NOT NULL,
     watchlist_name TEXT,
     model_name     TEXT,
     title          TEXT NOT NULL,
@@ -128,7 +127,6 @@ def utcnow() -> str:
 @dataclass(frozen=True)
 class ListingRow:
     listing_id: str
-    search_name: str
     title: str
     price_cents: int | None
     location: str | None
@@ -162,7 +160,6 @@ class ExtractionRow:
 def _row_to_listing(row: sqlite3.Row) -> ListingRow:
     return ListingRow(
         listing_id=row["listing_id"],
-        search_name=row["search_name"],
         title=row["title"],
         price_cents=row["price_cents"],
         location=row["location"],
@@ -234,6 +231,8 @@ class Store:
                 self._conn.execute("ALTER TABLE listings ADD COLUMN model_name TEXT")
             # v1 stored the claiming search's name. That name was always the
             # model in practice; only the grapple search belonged elsewhere.
+            # Both columns are filled together, so a row missing either one is
+            # half-populated and must be backfilled rather than skipped.
             self._conn.execute(
                 """
                 UPDATE listings
@@ -241,9 +240,17 @@ class Store:
                        watchlist_name = CASE WHEN search_name = 'root-grapple'
                                              THEN 'attachments'
                                              ELSE 'track-loaders' END
-                 WHERE model_name IS NULL
+                 WHERE model_name IS NULL OR watchlist_name IS NULL
                 """
             )
+
+        if version < 3:
+            columns = {
+                r["name"] for r in self._conn.execute("PRAGMA table_info(listings)")
+            }
+            if "search_name" in columns:
+                # SQLite 3.35+ supports DROP COLUMN; Python 3.12 ships 3.4x.
+                self._conn.execute("ALTER TABLE listings DROP COLUMN search_name")
 
         self._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         self._conn.commit()
@@ -268,7 +275,6 @@ class Store:
     def upsert_listing(
         self,
         listing: RawListing,
-        search_name: str,
         fp: str,
         watchlist_name: str | None = None,
         model_name: str | None = None,
@@ -276,11 +282,11 @@ class Store:
         now = utcnow()
         self._conn.execute(
             """
-            INSERT INTO listings (listing_id, search_name, watchlist_name, model_name,
+            INSERT INTO listings (listing_id, watchlist_name, model_name,
                                   title, price_cents, location,
                                   url, thumbnail_url, seller_name, fingerprint,
                                   first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(listing_id) DO UPDATE SET
                 title = excluded.title,
                 price_cents = excluded.price_cents,
@@ -290,7 +296,7 @@ class Store:
                 last_seen_at = excluded.last_seen_at
             """,
             (
-                listing.listing_id, search_name, watchlist_name, model_name,
+                listing.listing_id, watchlist_name, model_name,
                 listing.title, listing.price_cents,
                 listing.location, listing.url, listing.thumbnail_url,
                 listing.seller_name, fp, now, now,

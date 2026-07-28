@@ -9,8 +9,9 @@ Design: [`docs/superpowers/specs/2026-07-26-marketsearch-design.md`](docs/superp
 ## What it does
 
 - Searches Marketplace on a jittered 30–60 minute cadence during waking hours.
-- Drops listings that fail cheap gates (price band, title keywords) before
-  loading a single detail page.
+- Pools every search query's results, then keeps any listing matching any model
+  in your catalog — so a query for one machine still catches another you want.
+  Drops the rest before loading a single detail page.
 - Reads the survivors' descriptions with Claude, extracting engine hours,
   specs, stated condition, and attachments, then judging them against your
   criteria.
@@ -44,7 +45,7 @@ copy .env.example .env
 ```
 
 Edit `.env` with your real secrets — it is gitignored and must never be
-committed. Edit `config.yaml`: set your anchor city, radius, and searches.
+committed. Edit `config.yaml`: set your anchor city, radius, and watchlists.
 **Leave `notifications.enabled: false` for now.**
 
 Then log in and set your Marketplace location:
@@ -123,6 +124,7 @@ Set `notifications.enabled: true` in `config.yaml`. That's it.
 | `marketsearch history` | Recent runs and their counters. |
 | `marketsearch preview` | Re-render the last run's email. |
 | `marketsearch replay --search NAME --since 30d` | Re-judge stored listings. |
+| `marketsearch requeue` | Re-test stored rejections against the current catalog. No scraping. |
 | `marketsearch test-search "QUERY"` | Live search, prints parsed results. |
 | `marketsearch login` | Re-authenticate after a checkpoint. |
 

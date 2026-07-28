@@ -147,7 +147,8 @@ def test_watched_changes_reach_the_dispatcher(store: Store):
     from marketsearch.models import ListingDetail
     from marketsearch.pipeline import content_hash
 
-    store.upsert_listing(listing("1", price_cents=4_100_000), "bobcat-t770", "fp")
+    store.upsert_listing(listing("1", price_cents=4_100_000), "fp",
+                         "track-loaders", "bobcat-t770")
     detail = ListingDetail(listing_id="1", description="2400 hours",
                            structured_fields={}, photo_urls=[], distance_miles=None)
     store.save_detail(detail, content_hash(detail))

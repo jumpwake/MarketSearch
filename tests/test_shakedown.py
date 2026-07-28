@@ -39,7 +39,7 @@ def seed_extracted(
     store: Store, listing_id: str, verdict: str = "match",
     watchlist_name: str | None = "track-loaders", model_name: str | None = "bobcat-t770",
 ) -> None:
-    store.upsert_listing(listing(listing_id), "bobcat-t770", f"fp{listing_id}",
+    store.upsert_listing(listing(listing_id), f"fp{listing_id}",
                          watchlist_name=watchlist_name, model_name=model_name)
     detail = ListingDetail(listing_id=listing_id, description="2400 hours",
                            structured_fields={}, photo_urls=[], distance_miles=None)
@@ -197,7 +197,7 @@ def test_replay_writes_when_save_is_requested(store: Store):
 
 def test_replay_filters_by_model_name(store: Store):
     seed_extracted(store, "1")
-    store.upsert_listing(listing("2"), "some-other-search", "fp2")
+    store.upsert_listing(listing("2"), "fp2", "track-loaders", "bobcat-t86")
     rows = replay(store, watchlist_config(), FakeExtractor(), model_name="bobcat-t770",
                   since="30d")
     assert [r.listing_id for r in rows] == ["1"]
@@ -216,7 +216,7 @@ def test_replay_skips_a_listing_with_no_model_name(store: Store, caplog):
 
 
 def test_replay_skips_listings_with_no_stored_detail(store: Store):
-    store.upsert_listing(listing("3"), "bobcat-t770", "fp3")  # no detail saved
+    store.upsert_listing(listing("3"), "fp3", "track-loaders", "bobcat-t770")  # no detail saved
     rows = replay(store, watchlist_config(), FakeExtractor(), model_name="bobcat-t770",
                   since="30d")
     assert rows == []

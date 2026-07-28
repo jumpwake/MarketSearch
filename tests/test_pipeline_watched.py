@@ -59,7 +59,7 @@ def syncer(store, source, extractor=None, cfg=None, **kwargs) -> WatchSyncer:
 
 
 def seed(store: Store, listing_obj: RawListing, description="2400 hours") -> None:
-    store.upsert_listing(listing_obj, "bobcat-t770", "fp")
+    store.upsert_listing(listing_obj, "fp", "track-loaders", "bobcat-t770")
     detail = ListingDetail(listing_id=listing_obj.listing_id, description=description,
                            structured_fields={}, photo_urls=[], distance_miles=None)
     store.save_detail(detail, content_hash(detail))
@@ -80,7 +80,7 @@ def test_unsaving_on_facebook_clears_the_watch_flag(store: Store):
 
 def test_a_never_seen_saved_listing_is_extracted_for_a_baseline(store: Store):
     """Baseline assignment goes through `assign`, which needs a watchlist
-    catalog to judge against — a search-only config has none."""
+    catalog to judge against."""
     extractor = FakeExtractor()
     outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor,
                      cfg=watchlist_config()).sync()
@@ -91,9 +91,9 @@ def test_a_never_seen_saved_listing_is_extracted_for_a_baseline(store: Store):
 
 
 def test_a_never_seen_listing_skips_baseline_without_a_watchlist_catalog(store: Store):
-    """The live config.yaml has `searches:` and no `watchlists:` until Task 7
-    migrates it. One saved listing with nothing to judge it against must not
-    crash the whole sync — it should be skipped, not guessed at."""
+    """`load_config` now refuses a config with no watchlists, but WatchSyncer
+    must not depend on that: one saved listing with nothing to judge it against
+    should be skipped, not guessed at, rather than crashing the whole sync."""
     extractor = FakeExtractor()
     outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor).sync()
     assert outcome.changes == []

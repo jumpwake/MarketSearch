@@ -19,7 +19,7 @@ from marketsearch.store import ExtractionRow, ListingRow
 def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000,
             model_name="bobcat-t770") -> ListingRow:
     return ListingRow(
-        listing_id=listing_id, search_name="bobcat-t770", title=title,
+        listing_id=listing_id, title=title,
         price_cents=price_cents, location="Olathe, KS",
         url=f"https://www.facebook.com/marketplace/item/{listing_id}/",
         thumbnail_url=None, seller_name="Dale S", fingerprint="fp",

@@ -18,7 +18,7 @@ def store(tmp_path: Path) -> Store:
             location="Olathe, KS", url="https://example.com/1",
             thumbnail_url=None, seller_name="Dale S",
         ),
-        "bobcat-t770", "fp1",
+        "fp1",
     )
     yield s
     s.close()
@@ -79,7 +79,7 @@ def test_set_watched_ids_mirrors_facebook_exactly(store: Store):
     store.upsert_listing(
         RawListing(listing_id="2", title="T300", price_cents=None, location=None,
                    url="https://example.com/2", thumbnail_url=None, seller_name=None),
-        "bobcat-t300", "fp2",
+        "fp2",
     )
     store.set_watched_ids({"1", "2"})
     assert store.watched_listing_ids() == {"1", "2"}
