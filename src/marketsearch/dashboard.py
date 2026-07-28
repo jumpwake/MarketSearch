@@ -405,13 +405,13 @@ apply();
 
 _CSS = """
 :root {
-  --bg:#fbfbfa; --fg:#1c1e21; --muted:#6b7280; --line:#e3e5e8; --card:#fff;
-  --match:#0f7b4f; --unver:#9a6700; --nomatch:#8a8f98; --accent:#1d4ed8;
+  --bg:#f4f4f2; --fg:#1c1e21; --muted:#5b6472; --line:#e0e2e6; --card:#fff;
+  --match:#0f7b4f; --unver:#8a5a00; --nomatch:#7c828c; --accent:#2c5aa0;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg:#16181c; --fg:#e6e8eb; --muted:#9aa1ab; --line:#2a2e35; --card:#1e2126;
-    --match:#4ade80; --unver:#fbbf24; --nomatch:#8a8f98; --accent:#7aa2ff;
+    --bg:#141619; --fg:#e6e8eb; --muted:#a3aab5; --line:#2c3037; --card:#1e2126;
+    --match:#4ade80; --unver:#fbbf24; --nomatch:#8a8f98; --accent:#8fb3f5;
   }
 }
 * { box-sizing:border-box }
@@ -429,13 +429,50 @@ section { margin:28px 0 }
   background:var(--card); border:1px solid var(--line); border-radius:8px;
   padding:12px; overflow-x:auto;
 }
-.criteria summary { cursor:pointer; color:var(--accent) }
+/* A disclosure control, not a hyperlink — it should not read as blue body text. */
+.criteria summary {
+  cursor:pointer; color:var(--fg); font-weight:500;
+  padding:2px 0; user-select:none;
+}
+.criteria summary:hover { color:var(--accent) }
 .life { display:flex; gap:8px; align-items:center; font-size:13px; margin-bottom:6px }
 .life input { flex:0 1 240px }
-.picks { margin:12px 0 0; padding-left:22px }
-.picks li { margin-bottom:6px }
-.pick-value { font-weight:600; margin-left:8px }
-.pick-facts { color:var(--muted); margin-left:8px; font-size:13px }
+/* Top picks is a ranked table, not a bullet list: it sits on the same card
+   surface as everything else, and the rank numbers come from a CSS counter so
+   the markup stays a plain <ol>. */
+.picks {
+  margin:14px 0 0; padding:0; list-style:none; counter-reset:pick;
+  background:var(--card); border:1px solid var(--line); border-radius:12px;
+  overflow:hidden;
+}
+.picks li {
+  counter-increment:pick; margin:0; padding:11px 16px;
+  display:grid; grid-template-columns:1.4em 1fr auto auto; gap:14px;
+  align-items:baseline; border-top:1px solid var(--line);
+}
+.picks li:first-child { border-top:none }
+.picks li:hover { background:color-mix(in srgb, var(--accent) 6%, transparent) }
+.picks li::before {
+  content:counter(pick); color:var(--muted); font-size:12px;
+  font-variant-numeric:tabular-nums; text-align:right;
+}
+/* Without this the links fall through to browser-default blue, and go purple
+   once visited — the one place on the page that was not styled. */
+.picks li a { color:var(--fg); text-decoration:none; font-weight:500 }
+.picks li a:hover { color:var(--accent); text-decoration:underline }
+/* Tabular figures so the $/hr column lines up and can be scanned vertically. */
+.pick-value {
+  font-weight:600; text-align:right; white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.pick-facts {
+  color:var(--muted); font-size:13px; white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+@media (max-width:640px) {
+  .picks li { grid-template-columns:1.4em 1fr auto; row-gap:2px }
+  .pick-facts { grid-column:2 / -1; text-align:left }
+}
 .controls { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px }
 .controls input, .controls select, .v {
   padding:6px 10px; border:1px solid var(--line); border-radius:8px;
