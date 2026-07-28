@@ -10,8 +10,8 @@ from __future__ import annotations
 import html as _html
 from dataclasses import dataclass
 
-from marketsearch.config import Config
-from marketsearch.format import attribute_rows, dollars
+from marketsearch.config import Config, ModelConfig
+from marketsearch.format import attribute_rows, dollars, short_location
 from marketsearch.models import ListingDetail
 from marketsearch.store import ExtractionRow, ListingRow
 
@@ -127,6 +127,25 @@ def _live_models(config: Config) -> set[str]:
     return {m.name for w in config.watchlists for m in w.models}
 
 
+def _models_by_name(config: Config) -> dict[str, ModelConfig]:
+    return {m.name: m for w in config.watchlists for m in w.models}
+
+
+def _spec_text(model: ModelConfig | None) -> str:
+    """'92 hp · 10,900 lb', omitting whichever figure the config leaves out.
+
+    Attachments have neither, so they render nothing rather than a stub.
+    """
+    if model is None:
+        return ""
+    parts = []
+    if model.hp is not None:
+        parts.append(f"{model.hp} hp")
+    if model.weight_lb is not None:
+        parts.append(f"{model.weight_lb:,} lb")
+    return " · ".join(parts)
+
+
 def _criteria_blocks(config: Config) -> list[tuple[str, str]]:
     return [(w.name, w.criteria) for w in config.watchlists]
 
@@ -194,6 +213,7 @@ def render_dashboard(
 ) -> str:
     """Judged listings and config in, one self-contained HTML page out."""
     live = _live_models(config)
+    models = _models_by_name(config)
     picks = top_picks(rows, live, life_hours)
 
     if picks:
@@ -208,9 +228,13 @@ def render_dashboard(
             f'<span class="pick-value">'
             f"{_esc(_value_label(p.row.listing.price_cents, p.hours, life_hours))}"
             f"</span>"
+            f'<span class="pick-spec">'
+            f"{_esc(_spec_text(models.get(p.row.listing.model_name or '')))}"
+            f"</span>"
             f'<span class="pick-facts">'
             f"{'—' if p.hours is None else format(p.hours, ',')} hrs · "
-            f"{_esc(dollars(p.row.listing.price_cents))}</span></li>"
+            f"{_esc(dollars(p.row.listing.price_cents))} · "
+            f"{_esc(short_location(p.row.listing.location))}</span></li>"
             for p in picks
         )
         picks_html = f"<ol class='picks'>{picks_html}</ol>"
@@ -447,7 +471,7 @@ section { margin:28px 0 }
 }
 .picks li {
   counter-increment:pick; margin:0; padding:11px 16px;
-  display:grid; grid-template-columns:1.4em 1fr auto auto; gap:14px;
+  display:grid; grid-template-columns:1.4em 1fr auto auto auto; gap:14px;
   align-items:baseline; border-top:1px solid var(--line);
 }
 .picks li:first-child { border-top:none }
@@ -465,13 +489,17 @@ section { margin:28px 0 }
   font-weight:600; text-align:right; white-space:nowrap;
   font-variant-numeric:tabular-nums;
 }
+.pick-spec {
+  color:var(--muted); font-size:13px; white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
 .pick-facts {
   color:var(--muted); font-size:13px; white-space:nowrap;
   font-variant-numeric:tabular-nums;
 }
 @media (max-width:640px) {
   .picks li { grid-template-columns:1.4em 1fr auto; row-gap:2px }
-  .pick-facts { grid-column:2 / -1; text-align:left }
+  .pick-spec, .pick-facts { grid-column:2 / -1; text-align:left }
 }
 .controls { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px }
 .controls input, .controls select, .v {

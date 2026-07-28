@@ -193,3 +193,37 @@ def test_unknowns_are_surfaced_on_the_card():
     html = render([judged("1", "bobcat-t770", 3_000_000, 2200,
                           unknowns=["engine_hours", "quick_attach_plate"])])
     assert "quick_attach_plate" in html
+
+
+# ---- model spec chips and short location on Top Picks --------------------
+
+def test_pick_shows_hp_and_weight_from_the_model_config():
+    """HP is a property of the model, not the listing, so it comes from config."""
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200)])
+    assert "92 hp" in html
+    assert "10,900 lb" in html
+
+
+def test_pick_omits_spec_chips_when_the_model_has_no_figures():
+    """A model without hp/weight must not render an empty or 'None' chip."""
+    html = render([judged("1", "root-grapple", 300_000, None)])
+    picks = html[html.find('class="top"'):html.find('class="browse"')]
+    assert "None hp" not in picks
+    assert "None lb" not in picks
+
+
+def test_pick_shows_an_abbreviated_location():
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200,
+                          location="Cameron, Missouri")])
+    picks = html[html.find('class="top"'):html.find('class="browse"')]
+    assert "Cameron, MO" in picks
+    assert "Cameron, Missouri" not in picks
+
+
+def test_abbreviating_leaves_an_unrecognised_location_alone():
+    from marketsearch.format import short_location
+    assert short_location("Cameron, Missouri") == "Cameron, MO"
+    assert short_location("Sharon Grove, Kentucky") == "Sharon Grove, KY"
+    assert short_location("Peoria, IL") == "Peoria, IL"
+    assert short_location("Somewhere Odd") == "Somewhere Odd"
+    assert short_location(None) == ""

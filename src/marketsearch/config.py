@@ -77,6 +77,12 @@ class ModelConfig(BaseModel):
     keywords: list[str]
     price_min_cents: int
     price_max_cents: int
+    # Machine size, for telling models apart at a glance. These are properties
+    # of the model rather than of any listing, so they are stated here instead
+    # of asked of the extractor — most listings never mention horsepower, which
+    # would make it permanently `unverifiable`.
+    hp: int | None = None
+    weight_lb: int | None = None
 
     @field_validator("keywords")
     @classmethod

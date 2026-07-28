@@ -43,3 +43,40 @@ def attribute_rows(attributes: dict) -> list[tuple[str, str]]:
         ("Attachments", ", ".join(deal.get("attachments") or []) or "none stated"),
         ("Seller", yes_no(deal.get("seller_type"))),
     ]
+
+
+# Marketplace writes locations as "Cameron, Missouri". Space on a ranked row is
+# tight, and "Cameron, MO" carries the same information in half the width.
+_STATES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR",
+    "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC",
+}
+
+
+def short_location(location: str | None) -> str:
+    """'Cameron, Missouri' -> 'Cameron, MO'.
+
+    Anything that does not end in a recognised state name is returned
+    unchanged: a location the tool cannot parse is still worth showing, and
+    guessing at it would be worse than leaving it alone.
+    """
+    if not location:
+        return ""
+    city, _, state = location.rpartition(",")
+    if not city:
+        return location
+    abbreviation = _STATES.get(state.strip().lower())
+    return f"{city.strip()}, {abbreviation}" if abbreviation else location

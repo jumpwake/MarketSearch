@@ -14,13 +14,14 @@ LIVE = {"bobcat-t770", "kubota-svl95"}
 
 def judged(listing_id, model_name, price_cents, hours, verdict="match",
            title="a machine", reasoning="because", unknowns=None,
-           thumbnail_url="https://example.com/a.jpg") -> JudgedListing:
+           thumbnail_url="https://example.com/a.jpg",
+           location="Peoria, IL") -> JudgedListing:
     """One judged listing. `ListingRow` and `ExtractionRow` are frozen, so every
     varying field is a parameter here rather than assigned after construction."""
     return JudgedListing(
         listing=ListingRow(
             listing_id=listing_id, title=title, price_cents=price_cents,
-            location="Peoria, IL", url=f"https://example.com/{listing_id}",
+            location=location, url=f"https://example.com/{listing_id}",
             thumbnail_url=thumbnail_url, seller_name="Dale",
             fingerprint="fp", stage="matched", reject_reason=None, watched=False,
             first_seen_at="2026-07-27T10:00:00+00:00",

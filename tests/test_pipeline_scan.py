@@ -40,7 +40,8 @@ WATCHLIST_DICT = {
             "queries": ["Bobcat T770", "Bobcat T86 track loader"],
             "models": [
                 {"name": "bobcat-t770", "keywords": ["t770"],
-                 "price_min_cents": 1_500_000, "price_max_cents": 5_300_000},
+                 "price_min_cents": 1_500_000, "price_max_cents": 5_300_000,
+                 "hp": 92, "weight_lb": 10900},
                 {"name": "bobcat-t86", "keywords": ["t86"],
                  "price_min_cents": 3_000_000, "price_max_cents": 7_000_000},
             ],
