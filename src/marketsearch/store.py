@@ -346,13 +346,14 @@ class Store:
         row = cur.fetchone()
         return int(row["extraction_attempts"]) if row else 0
 
-    def pending_listings(self, search_name: str) -> list[RawListing]:
+    def pending_listings(self) -> list[RawListing]:
         """Listings awaiting a retry. Excludes 'failed', so a listing that has
-        exhausted its attempts is never picked up again."""
-        cur = self._conn.execute(
-            "SELECT * FROM listings WHERE search_name = ? AND stage = 'pending'",
-            (search_name,),
-        )
+        exhausted its attempts is never picked up again.
+
+        Not scoped by watchlist: assignment is recomputed on every pass, so the
+        stored one is not an input to the retry decision.
+        """
+        cur = self._conn.execute("SELECT * FROM listings WHERE stage = 'pending'")
         return [
             RawListing(
                 listing_id=row["listing_id"], title=row["title"],

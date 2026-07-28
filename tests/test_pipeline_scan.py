@@ -36,6 +36,41 @@ def config(**overrides) -> Config:
     return Config.model_validate(data)
 
 
+WATCHLIST_DICT = {
+    **{k: v for k, v in CONFIG_DICT.items() if k != "searches"},
+    "watchlists": [
+        {
+            "name": "track-loaders",
+            "queries": ["Bobcat T770", "Bobcat T86 track loader"],
+            "models": [
+                {"name": "bobcat-t770", "keywords": ["t770"],
+                 "price_min_cents": 1_500_000, "price_max_cents": 5_300_000},
+                {"name": "bobcat-t86", "keywords": ["t86"],
+                 "price_min_cents": 3_000_000, "price_max_cents": 7_000_000},
+            ],
+            "exclude": ["wanted", "s770"],
+            "on_unknown": "alert",
+            "criteria": "Under 3000 engine hours.",
+        },
+        {
+            "name": "attachments",
+            "queries": ["skid steer root grapple"],
+            "models": [
+                {"name": "root-grapple", "keywords": ["grapple"],
+                 "price_min_cents": 80_000, "price_max_cents": 600_000},
+            ],
+            "exclude": ["mini"],
+            "on_unknown": "alert",
+            "criteria": "Root grapple.",
+        },
+    ],
+}
+
+
+def watchlist_config(**overrides) -> Config:
+    return Config.model_validate({**WATCHLIST_DICT, **overrides})
+
+
 def listing(listing_id: str, title="2019 Bobcat T770", price_cents=3_800_000) -> RawListing:
     return RawListing(
         listing_id=listing_id, title=title, price_cents=price_cents,
@@ -83,6 +118,19 @@ class FakeSource:
         return []
 
 
+class QueryFakeSource(FakeSource):
+    """FakeSource that answers per query string, so pooling can be tested."""
+
+    def __init__(self, by_query: dict[str, list[RawListing]]):
+        super().__init__(results=[])
+        self.by_query = by_query
+        self.queries: list[str] = []
+
+    def search(self, query, location, radius_miles):
+        self.queries.append(query)
+        return list(self.by_query.get(query, []))
+
+
 class FakeExtractor:
     def __init__(self, result=None, error=None):
         self._result = result or extraction()
@@ -109,7 +157,7 @@ def store(tmp_path: Path) -> Store:
 
 def scanner(store, source, extractor=None, cfg=None, **kwargs) -> Scanner:
     return Scanner(
-        config=cfg or config(), store=store, source=source,
+        config=cfg or watchlist_config(), store=store, source=source,
         extractor=extractor or FakeExtractor(),
         photo_fetcher=lambda urls, limit=3: [b"img"],
         **kwargs,
@@ -173,7 +221,9 @@ def test_unverifiable_verdict_goes_to_the_unverified_bucket(store: Store):
 
 
 def test_on_unknown_skip_drops_unverifiable_listings(store: Store):
-    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    cfg = watchlist_config(
+        watchlists=[{**WATCHLIST_DICT["watchlists"][0], "on_unknown": "skip"}]
+    )
     extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
     outcome = scanner(store, FakeSource([listing("1")]), extractor, cfg=cfg).scan()
     assert outcome.unverified == []
@@ -242,8 +292,8 @@ def test_login_required_propagates_rather_than_being_swallowed(store: Store):
 
 
 def test_extraction_budget_is_respected(store: Store):
-    cfg = config(extraction={"model": "claude-opus-5", "effort": "low",
-                             "max_extractions_per_run": 2})
+    cfg = watchlist_config(extraction={"model": "claude-opus-5", "effort": "low",
+                                       "max_extractions_per_run": 2})
     source = FakeSource([listing(str(i)) for i in range(5)])
     extractor = FakeExtractor()
     # Distinct prices so each listing has a distinct fingerprint.
@@ -253,8 +303,8 @@ def test_extraction_budget_is_respected(store: Store):
 
 
 def test_listings_beyond_the_budget_stay_pending_for_the_next_run(store: Store):
-    cfg = config(extraction={"model": "claude-opus-5", "effort": "low",
-                             "max_extractions_per_run": 1})
+    cfg = watchlist_config(extraction={"model": "claude-opus-5", "effort": "low",
+                                       "max_extractions_per_run": 1})
     source = FakeSource([listing(str(i), price_cents=3_000_000 + i * 10_000)
                          for i in range(3)])
     scanner(store, source, cfg=cfg).scan()
@@ -291,7 +341,65 @@ def test_alerted_counter_separates_a_silent_run_from_an_unverifiable_one(store: 
 
 
 def test_alerted_counter_ignores_unverifiable_listings_the_search_skips(store: Store):
-    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    cfg = watchlist_config(
+        watchlists=[{**WATCHLIST_DICT["watchlists"][0], "on_unknown": "skip"}]
+    )
     extractor = FakeExtractor(extraction("unverifiable", ["engine_hours"]))
     outcome = scanner(store, FakeSource([listing("1")]), extractor, cfg=cfg).scan()
     assert outcome.counters.alerted == 0
+
+
+def test_listing_from_one_query_is_kept_by_another_watchlists_model(store: Store):
+    """The T86 query surfaces a T770. It must be kept, not rejected."""
+    t770 = listing("1917658885567966", title="2019 Bobcat T770", price_cents=4_200_000)
+    source = QueryFakeSource({"Bobcat T86 track loader": [t770]})
+
+    outcome = Scanner(watchlist_config(), store, source, FakeExtractor()).scan()
+    row = store.get_listing("1917658885567966")
+
+    assert outcome.counters.prefiltered == 0
+    assert row.model_name == "bobcat-t770"
+    assert row.watchlist_name == "track-loaders"
+    assert row.stage in {"matched", "extracted"}
+
+
+def test_every_watchlists_queries_are_searched(store: Store):
+    source = QueryFakeSource({})
+    Scanner(watchlist_config(), store, source, FakeExtractor()).scan()
+    assert source.queries == [
+        "Bobcat T770", "Bobcat T86 track loader", "skid steer root grapple",
+    ]
+
+
+def test_pooled_results_are_deduplicated_across_queries(store: Store):
+    t770 = listing("dupe", title="2019 Bobcat T770", price_cents=4_200_000)
+    source = QueryFakeSource(
+        {"Bobcat T770": [t770], "Bobcat T86 track loader": [t770]}
+    )
+
+    outcome = Scanner(watchlist_config(), store, source, FakeExtractor()).scan()
+
+    assert outcome.counters.found == 1
+    assert outcome.counters.new == 1
+
+
+def test_listing_no_watchlist_accepts_is_rejected_with_a_true_reason(store: Store):
+    junk = listing("junk", title="2018 Bobcat T595", price_cents=3_000_000)
+    source = QueryFakeSource({"Bobcat T770": [junk]})
+
+    Scanner(watchlist_config(), store, source, FakeExtractor()).scan()
+    row = store.get_listing("junk")
+
+    assert row.stage == "prefiltered_out"
+    assert row.reject_reason == "matched no watched model"
+
+
+def test_cheap_grapple_naming_a_machine_lands_in_attachments(store: Store):
+    grapple = listing("g1", title="Root grapple for Bobcat T770", price_cents=300_000)
+    source = QueryFakeSource({"skid steer root grapple": [grapple]})
+
+    Scanner(watchlist_config(), store, source, FakeExtractor()).scan()
+    row = store.get_listing("g1")
+
+    assert row.model_name == "root-grapple"
+    assert row.watchlist_name == "attachments"

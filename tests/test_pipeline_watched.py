@@ -9,7 +9,14 @@ from marketsearch.pipeline import WatchSyncer, content_hash
 from marketsearch.sources.base import ListingUnavailable, ParseError
 from marketsearch.store import Store
 
-from tests.test_pipeline_scan import CONFIG_DICT, FakeExtractor, config, extraction, listing
+from tests.test_pipeline_scan import (
+    WATCHLIST_DICT,
+    FakeExtractor,
+    config,
+    extraction,
+    listing,
+    watchlist_config,
+)
 
 
 class FakeWatchSource:
@@ -44,9 +51,9 @@ def store(tmp_path: Path) -> Store:
     s.close()
 
 
-def syncer(store, source, extractor=None, **kwargs) -> WatchSyncer:
+def syncer(store, source, extractor=None, cfg=None, **kwargs) -> WatchSyncer:
     return WatchSyncer(
-        config=config(), store=store, source=source,
+        config=cfg or config(), store=store, source=source,
         extractor=extractor or FakeExtractor(), **kwargs,
     )
 
@@ -72,8 +79,11 @@ def test_unsaving_on_facebook_clears_the_watch_flag(store: Store):
 
 
 def test_a_never_seen_saved_listing_is_extracted_for_a_baseline(store: Store):
+    """Baseline assignment goes through `assign`, which needs a watchlist
+    catalog to judge against — a search-only config has none."""
     extractor = FakeExtractor()
-    outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor).sync()
+    outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor,
+                     cfg=watchlist_config()).sync()
     assert extractor.calls == 1
     assert store.get_listing("9") is not None
     assert store.latest_extraction("9") is not None
@@ -159,18 +169,23 @@ def test_dry_run_writes_nothing(store: Store):
     assert store.watched_listing_ids() == set()
 
 
-def test_saved_listing_routes_to_the_search_matching_any_of_its_variants(store: Store):
-    """A machine saved while browsing must be judged against its own search's
-    criteria. Requiring every spelling variant sends it to searches[0] instead."""
+def test_saved_listing_routes_to_the_watchlist_and_model_matching_its_title(store: Store):
+    """A machine saved while browsing must be judged against the model whose
+    keywords match it, not the first model in the catalog. Requiring every
+    spelling variant on one model, rather than any of them, would leave a
+    hyphenated listing unassigned."""
     t870 = {
-        "name": "bobcat-t870", "query": "Bobcat T870",
+        "name": "bobcat-t870", "keywords": ["t870", "t-870", "t 870"],
         "price_min_cents": 2_000_000, "price_max_cents": 5_500_000,
-        "title_must_match": ["t870", "t-870", "t 870"], "title_must_not_match": [],
-        "on_unknown": "alert", "criteria": "Under 3500 engine hours.",
     }
-    cfg = config(searches=[CONFIG_DICT["searches"][0], t870])
+    cfg = watchlist_config(watchlists=[{
+        **WATCHLIST_DICT["watchlists"][0],
+        "models": [WATCHLIST_DICT["watchlists"][0]["models"][0], t870],
+    }])
     source = FakeWatchSource(saved=[listing("9", title="2020 Bobcat T-870 track loader")])
 
     WatchSyncer(config=cfg, store=store, source=source, extractor=FakeExtractor()).sync()
 
-    assert store.get_listing("9").search_name == "bobcat-t870"
+    row = store.get_listing("9")
+    assert row.watchlist_name == "track-loaders"
+    assert row.model_name == "bobcat-t870"

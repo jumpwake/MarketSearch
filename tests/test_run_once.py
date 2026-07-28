@@ -9,7 +9,7 @@ from marketsearch.runstate import OperationalAlerts, needs_login, set_needs_logi
 from marketsearch.sources.base import LoginRequired, ParseError
 from marketsearch.store import Store
 
-from tests.test_pipeline_scan import FakeExtractor, config, listing
+from tests.test_pipeline_scan import FakeExtractor, listing, watchlist_config
 from tests.test_pipeline_watched import FakeWatchSource
 
 
@@ -55,7 +55,7 @@ def store(tmp_path: Path) -> Store:
 
 def execute(store, source, dispatcher=None, operational=None, **kwargs):
     return run_once(
-        config=config(), store=store, source=source, extractor=FakeExtractor(),
+        config=watchlist_config(), store=store, source=source, extractor=FakeExtractor(),
         dispatcher=dispatcher or RecordingDispatcher(),
         alerts=OperationalAlerts(store),
         notify_operational=operational or RecordingOperational(),

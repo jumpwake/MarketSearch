@@ -8,12 +8,12 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Protocol
 
-from marketsearch.config import Config, SearchConfig
+from marketsearch.config import Config, WatchlistConfig
 from marketsearch.extract import ExtractionError, Extractor
 from marketsearch.fingerprint import fingerprint
 from marketsearch.models import ListingDetail, RawListing
 from marketsearch.notify.render import ChangeCard, MatchCard, download_photos
-from marketsearch.prefilter import prefilter
+from marketsearch.prefilter import Assignment, Rejection, assign
 from marketsearch.runstate import (
     OperationalAlerts,
     clear_needs_login,
@@ -66,7 +66,7 @@ def content_hash(detail: ListingDetail) -> str:
 
 
 def listing_row_from(
-    listing: RawListing, search_name: str, fp: str, stage: str
+    listing: RawListing, watchlist_name: str, model_name: str, fp: str, stage: str
 ) -> ListingRow:
     """Build a ListingRow without a database read.
 
@@ -75,7 +75,9 @@ def listing_row_from(
     """
     now = utcnow()
     return ListingRow(
-        listing_id=listing.listing_id, search_name=search_name, title=listing.title,
+        listing_id=listing.listing_id, search_name=model_name,
+        watchlist_name=watchlist_name, model_name=model_name,
+        title=listing.title,
         price_cents=listing.price_cents, location=listing.location, url=listing.url,
         thumbnail_url=listing.thumbnail_url, seller_name=listing.seller_name,
         fingerprint=fp, stage=stage, reject_reason=None, watched=False,
@@ -106,31 +108,39 @@ class Scanner:
         unverified: list[MatchCard] = []
         counters = ScanCounters()
         budget = self._config.extraction.max_extractions_per_run
+        watchlists = self._config.watchlists
 
-        for search in self._config.searches:
-            listings = self._source.search(
-                search.query, self._config.location.anchor,
-                self._config.location.radius_miles,
+        # Every query feeds one pool. A query is discovery, not a filter: the
+        # T86 query routinely returns T770s, and those are worth keeping.
+        pooled: dict[str, RawListing] = {}
+        for watchlist in watchlists:
+            for query in watchlist.queries:
+                for listing in self._source.search(
+                    query,
+                    self._config.location.anchor,
+                    self._config.location.radius_miles,
+                ):
+                    pooled.setdefault(listing.listing_id, listing)
+
+        counters.found = len(pooled)
+
+        known = self._store.known_listing_ids(list(pooled))
+        fresh = [l for lid, l in pooled.items() if lid not in known]
+        counters.new = len(fresh)
+
+        # Listings that failed extraction earlier are already in `pooled`, so
+        # dedupe would exclude them forever. Pull them back in explicitly.
+        retries = [] if self._dry_run else self._store.pending_listings()
+        log.info(
+            "%d pooled listing(s), %d new, %d awaiting retry",
+            len(pooled), len(fresh), len(retries),
+        )
+
+        for listing in fresh + retries:
+            budget -= self._process(
+                listing, watchlists, matches, unverified, counters,
+                budget_remaining=budget,
             )
-            counters.found += len(listings)
-
-            known = self._store.known_listing_ids([l.listing_id for l in listings])
-            fresh = [l for l in listings if l.listing_id not in known]
-            counters.new += len(fresh)
-
-            # Listings that failed extraction earlier are already in `listings`,
-            # so dedupe would exclude them forever. Pull them back in explicitly.
-            retries = [] if self._dry_run else self._store.pending_listings(search.name)
-            log.info(
-                "%s: %d listings, %d new, %d awaiting retry",
-                search.name, len(listings), len(fresh), len(retries),
-            )
-
-            for listing in fresh + retries:
-                budget -= self._process(
-                    listing, search, matches, unverified, counters,
-                    budget_remaining=budget,
-                )
 
         return ScanOutcome(matches=matches, unverified=unverified, counters=counters)
 
@@ -157,25 +167,34 @@ class Scanner:
     def _process(
         self,
         listing: RawListing,
-        search: SearchConfig,
+        watchlists: list[WatchlistConfig],
         matches: list[MatchCard],
         unverified: list[MatchCard],
         counters: ScanCounters,
         budget_remaining: int,
     ) -> int:
-        """Handle one new listing. Returns the number of extractions consumed."""
+        """Handle one listing. Returns the number of extractions consumed."""
         fp = fingerprint(
             listing.title, listing.price_cents, listing.seller_name, listing.location
         )
+        decision = assign(listing, watchlists)
 
-        if not self._dry_run:
-            self._store.upsert_listing(listing, search.name, fp)
-
-        decision = prefilter(listing, search)
-        if not decision.keep:
+        if isinstance(decision, Rejection):
+            if not self._dry_run:
+                self._store.upsert_listing(listing, "", fp)
             counters.prefiltered += 1
             self._set_stage(listing.listing_id, "prefiltered_out", decision.reason)
             return 0
+
+        watchlist, model = decision.watchlist, decision.model
+        if not self._dry_run:
+            self._store.upsert_listing(
+                listing, model.name, fp,
+                watchlist_name=watchlist.name, model_name=model.name,
+            )
+            # upsert leaves an existing row's assignment alone; a listing whose
+            # accepting watchlist changed after a config edit must follow it.
+            self._store.reassign(listing.listing_id, watchlist.name, model.name)
 
         if not self._dry_run and self._store.fingerprint_seen_before(
             fp, listing.listing_id, RELIST_WINDOW_DAYS
@@ -203,7 +222,7 @@ class Scanner:
             self._store.save_detail(detail, content_hash(detail))
 
         try:
-            result = self._extractor.extract(listing, detail, search.criteria)
+            result = self._extractor.extract(listing, detail, watchlist.criteria)
         except ExtractionError as exc:
             log.warning("extraction failed for %s: %s", listing.listing_id, exc)
             self._record_failure(listing.listing_id, counters, "extraction failed")
@@ -240,16 +259,20 @@ class Scanner:
             counters.matched += 1
             matches.append(
                 MatchCard(
-                    listing=listing_row_from(listing, search.name, fp, stage),
+                    listing=listing_row_from(
+                        listing, watchlist.name, model.name, fp, stage
+                    ),
                     extraction=row,
                     photos=self._photo_fetcher(detail.photo_urls),
                 )
             )
-        elif extraction.verdict == "unverifiable" and search.on_unknown == "alert":
+        elif extraction.verdict == "unverifiable" and watchlist.on_unknown == "alert":
             counters.alerted += 1
             unverified.append(
                 MatchCard(
-                    listing=listing_row_from(listing, search.name, fp, stage),
+                    listing=listing_row_from(
+                        listing, watchlist.name, model.name, fp, stage
+                    ),
                     extraction=row,
                     photos=self._photo_fetcher(detail.photo_urls),
                 )
@@ -285,18 +308,17 @@ class WatchSyncer:
         self._extractor = extractor
         self._dry_run = dry_run
 
-    def _search_for(self, title: str) -> SearchConfig:
-        """Pick the search whose title filters this listing satisfies.
+    def _assign(self, listing: RawListing) -> tuple[WatchlistConfig, str]:
+        """Pick the watchlist whose criteria judge a saved listing.
 
-        A machine saved while browsing may not belong to any configured search;
-        the first search's criteria are a reasonable default and the alert
-        still carries the full attribute table.
+        A machine saved while browsing may match no catalog at all; the first
+        watchlist's criteria are a reasonable default and the alert still
+        carries the full attribute table.
         """
-        lowered = title.lower()
-        for search in self._config.searches:
-            if search.title_must_match and any(t in lowered for t in search.title_must_match):
-                return search
-        return self._config.searches[0]
+        decision = assign(listing, self._config.watchlists)
+        if isinstance(decision, Assignment):
+            return decision.watchlist, decision.model.name
+        return self._config.watchlists[0], ""
 
     def sync(self) -> WatchOutcome:
         saved = self._source.fetch_saved()
@@ -358,19 +380,22 @@ class WatchSyncer:
     def _baseline(self, listing: RawListing) -> None:
         """First sight of a listing saved while browsing. Establish a record so
         later runs have something to diff against."""
-        search = self._search_for(listing.title)
+        watchlist, model_name = self._assign(listing)
         fp = fingerprint(
             listing.title, listing.price_cents, listing.seller_name, listing.location
         )
         if not self._dry_run:
-            self._store.upsert_listing(listing, search.name, fp)
+            self._store.upsert_listing(
+                listing, model_name, fp,
+                watchlist_name=watchlist.name, model_name=model_name or None,
+            )
 
         detail = self._source.fetch_detail(listing.listing_id)
         if not self._dry_run:
             self._store.save_detail(detail, content_hash(detail))
 
         try:
-            result = self._extractor.extract(listing, detail, search.criteria)
+            result = self._extractor.extract(listing, detail, watchlist.criteria)
         except ExtractionError as exc:
             log.warning("baseline extraction failed for %s: %s", listing.listing_id, exc)
             return
