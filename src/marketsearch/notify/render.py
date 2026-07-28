@@ -15,6 +15,7 @@ from typing import Callable
 
 from jinja2 import Environment, select_autoescape
 
+from marketsearch.format import attribute_rows, dollars, hours_text, yes_no
 from marketsearch.store import ExtractionRow, ListingRow
 
 log = logging.getLogger(__name__)
@@ -43,43 +44,6 @@ class RenderedEmail:
     subject: str
     html: str
     images: list[tuple[str, bytes]]
-
-
-def _dollars(cents: int | None) -> str:
-    return "—" if cents is None else f"${cents / 100:,.0f}"
-
-
-def _yes_no(value: object) -> str:
-    if value is None:
-        return "—"
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    return str(value)
-
-
-def _hours(attributes: dict) -> str:
-    hours = attributes.get("core", {}).get("engine_hours")
-    return "—" if hours is None else f"{hours:,}"
-
-
-def _attribute_rows(attributes: dict) -> list[tuple[str, str]]:
-    core = attributes.get("core", {})
-    specs = attributes.get("specs", {})
-    condition = attributes.get("condition", {})
-    deal = attributes.get("deal", {})
-    return [
-        ("Hours", _hours(attributes)),
-        ("Year", _yes_no(core.get("year"))),
-        ("Cab", _yes_no(specs.get("cab_enclosed"))),
-        ("A/C", _yes_no(specs.get("has_ac"))),
-        ("2-speed", _yes_no(specs.get("two_speed"))),
-        ("High flow", _yes_no(specs.get("high_flow"))),
-        ("Undercarriage", _yes_no(specs.get("undercarriage_condition"))),
-        ("Runs", _yes_no(condition.get("runs"))),
-        ("Issues", ", ".join(condition.get("stated_issues") or []) or "none stated"),
-        ("Attachments", ", ".join(deal.get("attachments") or []) or "none stated"),
-        ("Seller", _yes_no(deal.get("seller_type"))),
-    ]
 
 
 _TEMPLATE = """\
@@ -162,10 +126,10 @@ def _card_context(card: MatchCard) -> tuple[dict, list[tuple[str, bytes]]]:
 
     context = {
         "title": card.listing.title,
-        "price": _dollars(card.listing.price_cents),
+        "price": dollars(card.listing.price_cents),
         "location": card.listing.location or "location not stated",
         "url": card.listing.url,
-        "rows": _attribute_rows(card.extraction.attributes),
+        "rows": attribute_rows(card.extraction.attributes),
         "reasoning": card.extraction.reasoning,
         "unknowns": ", ".join(card.extraction.unknowns) if card.extraction.unknowns else "",
         "cids": cids,
@@ -177,7 +141,7 @@ def _change_context(change: ChangeCard) -> dict:
     if change.kind == "removed":
         return {
             "headline": f"Listing removed (likely sold): {change.listing.title}",
-            "detail": f"Last seen at {_dollars(change.old_price_cents)}.",
+            "detail": f"Last seen at {dollars(change.old_price_cents)}.",
             "url": change.listing.url,
         }
     direction = "Price drop" if (
@@ -187,7 +151,7 @@ def _change_context(change: ChangeCard) -> dict:
     ) else "Price change"
     return {
         "headline": f"{direction}: {change.listing.title}",
-        "detail": f"{_dollars(change.old_price_cents)} → {_dollars(change.new_price_cents)}",
+        "detail": f"{dollars(change.old_price_cents)} → {dollars(change.new_price_cents)}",
         "url": change.listing.url,
     }
 
