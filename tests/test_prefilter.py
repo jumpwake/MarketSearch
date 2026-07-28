@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from marketsearch.config import SearchConfig
+from marketsearch.config import ModelConfig, SearchConfig, WatchlistConfig
 from marketsearch.models import RawListing
-from marketsearch.prefilter import prefilter
+from marketsearch.prefilter import Assignment, Rejection, assign, identify_model, offer, prefilter
 
 
 def search(**overrides) -> SearchConfig:
@@ -151,3 +151,108 @@ def test_required_terms_still_match_inside_a_longer_model_number():
         search(title_must_match=["299d"], price_max_cents=5_000_000),
     )
     assert result.keep is True
+
+
+def model(name, keywords, lo, hi):
+    return ModelConfig(
+        name=name, keywords=keywords,
+        price_min_cents=lo * 100, price_max_cents=hi * 100,
+    )
+
+
+MACHINES = WatchlistConfig(
+    name="track-loaders",
+    queries=["Bobcat T770"],
+    models=[
+        model("bobcat-t770", ["t770", "t-770"], 15000, 53000),
+        model("bobcat-t750", ["t750"], 15000, 50000),
+    ],
+    exclude=["wanted", "s770"],
+    criteria="Under 3000 hours.",
+)
+
+ATTACHMENTS = WatchlistConfig(
+    name="attachments",
+    queries=["skid steer root grapple"],
+    models=[model("root-grapple", ["grapple"], 800, 6000)],
+    exclude=["mini"],
+    criteria="Root grapple.",
+)
+
+ALL = [MACHINES, ATTACHMENTS]
+
+
+def wl_listing(title, price_cents):
+    return RawListing(
+        listing_id="1", title=title, price_cents=price_cents, location="Peoria, IL",
+        url="https://example.com/1", thumbnail_url=None, seller_name=None,
+    )
+
+
+def test_identify_model_matches_substring():
+    assert identify_model("2019 bobcat t770 loader", MACHINES).name == "bobcat-t770"
+
+
+def test_identify_model_returns_none_when_nothing_matches():
+    assert identify_model("2018 bobcat t595", MACHINES) is None
+
+
+def test_a_query_keeps_a_machine_from_another_model():
+    """The whole point: the T86 query surfaced a T770 and we keep it."""
+    result = assign(wl_listing("2019 Bobcat T770", 4_200_000), ALL)
+    assert isinstance(result, Assignment)
+    assert result.model.name == "bobcat-t770"
+    assert result.watchlist.name == "track-loaders"
+
+
+def test_machine_sold_with_a_grapple_is_a_machine():
+    result = assign(wl_listing("2019 Bobcat T770 with root grapple", 4_200_000), ALL)
+    assert isinstance(result, Assignment)
+    assert result.model.name == "bobcat-t770"
+
+
+def test_grapple_for_a_machine_falls_through_on_price():
+    """t770 matches, but $3,000 is below the machine band, so attachments take it."""
+    result = assign(wl_listing("Root grapple for Bobcat T770", 300_000), ALL)
+    assert isinstance(result, Assignment)
+    assert result.model.name == "root-grapple"
+    assert result.watchlist.name == "attachments"
+
+
+def test_plain_grapple_falls_through_on_no_model():
+    result = assign(wl_listing("Eterra skidsteer Grapple", 549_500), ALL)
+    assert isinstance(result, Assignment)
+    assert result.model.name == "root-grapple"
+
+
+def test_rejected_when_no_watchlist_accepts():
+    result = assign(wl_listing("2018 Bobcat T595", 3_000_000), ALL)
+    assert isinstance(result, Rejection)
+    assert result.reason == "matched no watched model"
+
+
+def test_exclusion_beats_a_model_match():
+    result = assign(wl_listing("Wanted: Bobcat T770", 4_000_000), ALL)
+    assert isinstance(result, Rejection)
+    assert "excluded term 'wanted'" in result.reason
+
+
+def test_exclusions_are_whole_word():
+    """'s770' must not fire on 'Bobcat T770'."""
+    assert isinstance(assign(wl_listing("2019 Bobcat T770", 4_000_000), ALL), Assignment)
+
+
+def test_price_reason_names_the_model():
+    result = assign(wl_listing("2019 Bobcat T770", 9_900_000), ALL)
+    assert isinstance(result, Rejection)
+    assert "bobcat-t770" in result.reason
+    assert "above" in result.reason
+
+
+def test_missing_price_is_not_a_rejection():
+    result = assign(wl_listing("2019 Bobcat T770", None), ALL)
+    assert isinstance(result, Assignment)
+
+
+def test_offer_declines_without_consulting_other_watchlists():
+    assert isinstance(offer(wl_listing("Eterra Grapple", 549_500), MACHINES), Rejection)
