@@ -292,3 +292,24 @@ def replay(
     typer.echo(format_replay(rows, search))
     if not save and rows:
         typer.echo("\n(Not saved. Re-run with --save to persist these verdicts.)")
+
+
+@app.command(name="requeue")
+def requeue_command(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report without writing."),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Re-test rejected listings against the current catalog. No scraping."""
+    from marketsearch.requeue import format_requeue
+    from marketsearch.requeue import requeue as run_requeue
+
+    setup_logging(DEFAULT_LOG, verbose)
+    cfg = _load(config)
+
+    with Store(db) as store:
+        store.initialize()
+        rows = run_requeue(store, cfg, dry_run=dry_run)
+
+    typer.echo(format_requeue(rows, dry_run))
