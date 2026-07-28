@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,9 +35,12 @@ def store(tmp_path: Path) -> Store:
     s.close()
 
 
-def seed_extracted(store: Store, listing_id: str, verdict: str = "match") -> None:
+def seed_extracted(
+    store: Store, listing_id: str, verdict: str = "match",
+    watchlist_name: str | None = "track-loaders", model_name: str | None = "bobcat-t770",
+) -> None:
     store.upsert_listing(listing(listing_id), "bobcat-t770", f"fp{listing_id}",
-                         watchlist_name="track-loaders", model_name="bobcat-t770")
+                         watchlist_name=watchlist_name, model_name=model_name)
     detail = ListingDetail(listing_id=listing_id, description="2400 hours",
                            structured_fields={}, photo_urls=[], distance_miles=None)
     store.save_detail(detail, content_hash(detail))
@@ -63,6 +67,13 @@ def test_unknown_model_resolves_to_no_watchlist():
 def test_grapple_model_resolves_to_the_attachments_watchlist():
     watchlist = _watchlist_by_name(watchlist_config(), "root-grapple")
     assert watchlist.name == "attachments"
+
+
+def test_watchlist_lookup_of_a_none_model_name_returns_none_not_an_error():
+    """A listing baselined by WatchSyncer._baseline with no matching model in
+    any watchlist is stored with model_name=None — a reachable state, not
+    just a theoretical one. The lookup must not raise for it."""
+    assert _watchlist_by_name(watchlist_config(), None) is None
 
 
 def test_parse_since_days():
@@ -116,6 +127,20 @@ def test_collect_run_cards_respects_on_unknown_skip(store: Store):
     assert unverified == []
 
 
+def test_collect_run_cards_handles_a_listing_with_no_model_name(store: Store):
+    """WatchSyncer._baseline can store a matched/unverifiable listing with
+    model_name=None when a saved listing matches no specific model. That must
+    not crash card collection — it should behave like any other listing whose
+    watchlist can't be found."""
+    run_id = store.start_run()
+    seed_extracted(store, "1", "unverifiable", watchlist_name=None, model_name=None)
+    store.finish_run(run_id, {})
+
+    matches, unverified = collect_run_cards(store, watchlist_config(), run_id)
+    assert matches == []
+    assert [c.listing.listing_id for c in unverified] == ["1"]
+
+
 def test_collect_run_cards_ignores_other_runs(store: Store):
     first = store.start_run()
     seed_extracted(store, "1", "match")
@@ -165,6 +190,18 @@ def test_replay_filters_by_model_name(store: Store):
     rows = replay(store, watchlist_config(), FakeExtractor(), model_name="bobcat-t770",
                   since="30d")
     assert [r.listing_id for r in rows] == ["1"]
+
+
+def test_replay_skips_a_listing_with_no_model_name(store: Store, caplog):
+    """Same reachable state as above: a stored listing with model_name=None
+    must be skipped with the existing warning, not crash replay."""
+    seed_extracted(store, "1", "unverifiable", watchlist_name=None, model_name=None)
+
+    with caplog.at_level(logging.WARNING, logger="marketsearch.shakedown"):
+        rows = replay(store, watchlist_config(), FakeExtractor(), model_name=None, since="30d")
+
+    assert rows == []
+    assert "skipping" in caplog.text
 
 
 def test_replay_skips_listings_with_no_stored_detail(store: Store):

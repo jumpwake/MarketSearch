@@ -168,6 +168,23 @@ def test_sms_names_models_not_searches():
     assert "root-grapple" in body
 
 
+def test_sms_counts_a_none_model_match_but_omits_it_from_names():
+    """A match card can legitimately carry model_name=None (WatchSyncer's
+    baseline path for a saved listing that matches no specific model). The
+    count must still include it; the name list must not gain a literal
+    "None"."""
+    cards = [
+        MatchCard(listing=listing("1", model_name="bobcat-t770"),
+                  extraction=extraction(), photos=[]),
+        MatchCard(listing=listing("2", model_name=None),
+                  extraction=extraction(), photos=[]),
+    ]
+    body = render_sms(cards, [], [])
+    assert "bobcat-t770" in body
+    assert "None" not in body
+    assert "2 new match" in body
+
+
 def test_sms_mentions_changes_when_there_are_no_matches():
     change = ChangeCard(listing=listing(), kind="price_change",
                         old_price_cents=4_100_000, new_price_cents=3_800_000)
