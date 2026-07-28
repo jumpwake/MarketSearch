@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from marketsearch.dashboard import render_dashboard
 from tests.test_dashboard_ranking import judged
 from tests.test_pipeline_scan import watchlist_config
@@ -9,6 +11,25 @@ STAMP = "2026-07-28T09:00:00+00:00"
 
 def render(rows, life_hours=6000):
     return render_dashboard(rows, watchlist_config(), STAMP, life_hours)
+
+
+def _card_html(html, listing_id):
+    """The single <article class="card" ...>...</article> block for one
+    listing, so assertions can be scoped to what that card actually
+    renders rather than matching boilerplate text baked into `_JS` that
+    appears on every page regardless of test data."""
+    match = re.search(
+        rf'<article class="card" data-listing-id="{re.escape(listing_id)}".*?</article>',
+        html, re.S,
+    )
+    assert match, f"no card found for listing {listing_id!r}"
+    return match.group(0)
+
+
+def _value_chip_text(card_html):
+    match = re.search(r'<span class="chip value-chip">(.*?)</span>', card_html, re.S)
+    assert match, "value-chip span not found in card"
+    return match.group(1)
 
 
 def test_a_script_tag_in_a_title_is_escaped():
@@ -70,7 +91,22 @@ def test_cards_carry_the_data_the_client_script_sorts_on():
 def test_unknown_hours_are_labelled_not_zero():
     html = render([judged("1", "bobcat-t770", 3_000_000, None)])
     assert 'data-hours=""' in html
-    assert "hours unknown" in html.lower()
+    # Scoped to this card's value chip rather than the whole page: the
+    # literal "hours unknown" also appears in _JS's boilerplate on every
+    # render, so a page-wide substring check would pass even if _card's
+    # own unknown-hours label were broken.
+    card = _card_html(html, "1")
+    assert "hours unknown" in _value_chip_text(card).lower()
+
+
+def test_unknown_price_renders_as_empty_not_zero():
+    """`data-price-cents` must distinguish "unknown price" from "literally
+    free" the same way `data-hours` already distinguishes unknown hours
+    from zero hours — otherwise the client-side value formula cannot tell
+    the two apart either."""
+    html = render([judged("1", "bobcat-t770", None, 2200)])
+    assert 'data-price-cents=""' in html
+    assert 'data-price-cents="0"' not in html
 
 
 def test_a_missing_thumbnail_renders_a_placeholder():

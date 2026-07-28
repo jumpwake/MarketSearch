@@ -135,7 +135,7 @@ def _card(row: JudgedListing, life_hours: int) -> str:
 <article class="card" data-listing-id="{_esc(listing.listing_id)}"
          data-verdict="{_esc(extraction.verdict)}"
          data-model="{_esc(listing.model_name)}"
-         data-price-cents="{listing.price_cents or 0}"
+         data-price-cents="{'' if listing.price_cents is None else listing.price_cents}"
          data-hours="{'' if hours is None else hours}"
          data-confidence="{extraction.confidence}"
          data-seen="{_esc(listing.first_seen_at)}">
@@ -263,8 +263,9 @@ const off = new Set();
 function value(card, lifeHours) {
   const h = card.dataset.hours;
   if (h === '') return null;
-  const cents = Number(card.dataset.priceCents);
-  if (!cents) return null;
+  const p = card.dataset.priceCents;
+  if (p === '') return null;
+  const cents = Number(p);
   return (cents / 100) / Math.max(lifeHours - Number(h), 1);
 }
 
