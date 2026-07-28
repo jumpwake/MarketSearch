@@ -89,6 +89,36 @@ def top_picks(
     return picks[:limit]
 
 
+def _value_label(price_cents: int | None, hours: int | None, life_hours: int) -> str:
+    """Mirrors valueLabel() in _JS — keep the two in step.
+
+    Missing hours and missing price are different failures and must read
+    differently. `value_per_remaining_hour` collapses both into a single
+    None, which is right for sorting but wrong for display: a listing with
+    known hours and no price is not the same unknown as one with a price
+    and no stated hours.
+    """
+    if hours is None:
+        return "hours unknown"
+    if price_cents is None:
+        return "price unknown"
+    value = value_per_remaining_hour(price_cents, hours, life_hours)
+    assert value is not None  # both inputs present, per the checks above
+    return f"${value:,.2f}/hr"
+
+
+def _slider_bounds(life_hours: int) -> tuple[int, int]:
+    """Slider min/max that always contain the supplied life_hours.
+
+    `--life-hours` accepts any integer, but the slider previously had
+    hardcoded bounds (3000-12000). A value outside that range rendered Top
+    Picks at the CLI's life_hours while the browser silently clamped the
+    slider on first use, desyncing the two numbers the moment the user
+    touched it.
+    """
+    return min(3000, life_hours), max(12000, life_hours)
+
+
 def _esc(value: object) -> str:
     return _html.escape("" if value is None else str(value), quote=True)
 
@@ -115,7 +145,6 @@ def _photo(row: JudgedListing) -> str:
 def _card(row: JudgedListing, life_hours: int) -> str:
     listing, extraction = row.listing, row.extraction
     hours = engine_hours(extraction)
-    value = value_per_remaining_hour(listing.price_cents, hours, life_hours)
 
     rows_html = "".join(
         f"<div class=\"attr\"><dt>{_esc(label)}</dt><dd>{_esc(text)}</dd></div>"
@@ -129,7 +158,7 @@ def _card(row: JudgedListing, life_hours: int) -> str:
         )
         unknowns_html = f'<div class="unknowns"><span>could not determine</span>{chips}</div>'
 
-    value_text = "hours unknown" if value is None else f"${value:,.2f}/hr"
+    value_text = _value_label(listing.price_cents, hours, life_hours)
 
     return f"""
 <article class="card" data-listing-id="{_esc(listing.listing_id)}"
@@ -171,11 +200,13 @@ def render_dashboard(
         noun = "match" if len(picks) == 1 else "matches"
         picks_head = f"{len(picks)} {noun} from models in your config"
         picks_html = "".join(
-            f'<li data-pick="{_esc(p.row.listing.listing_id)}">'
+            f'<li data-pick="{_esc(p.row.listing.listing_id)}"'
+            f' data-hours="{"" if p.hours is None else p.hours}"'
+            f' data-price-cents="{"" if p.row.listing.price_cents is None else p.row.listing.price_cents}">'
             f'<a href="{_esc(p.row.listing.url)}" target="_blank" rel="noopener">'
             f"{_esc(p.row.listing.title)}</a>"
             f'<span class="pick-value">'
-            f"{'hours unknown' if p.value_per_hour is None else f'${p.value_per_hour:,.2f}/hr'}"
+            f"{_esc(_value_label(p.row.listing.price_cents, p.hours, life_hours))}"
             f"</span>"
             f'<span class="pick-facts">'
             f"{'—' if p.hours is None else format(p.hours, ',')} hrs · "
@@ -201,6 +232,8 @@ def render_dashboard(
         '<p class="empty">Nothing judged yet — run a sweep first.</p>'
     )
 
+    life_min, life_max = _slider_bounds(life_hours)
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -217,7 +250,7 @@ def render_dashboard(
 <section class="top">
   <h2>Top picks <span class="sub">{_esc(picks_head)}</span></h2>
   <label class="life">Assumed usable life
-    <input id="life" type="range" min="3000" max="12000" step="500" value="{life_hours}">
+    <input id="life" type="range" min="{life_min}" max="{life_max}" step="500" value="{life_hours}">
     <output id="lifeOut">{life_hours:,}</output> hrs
   </label>
   <p class="caveat">Ranked on hours and price only — blind to condition.
@@ -252,6 +285,8 @@ def render_dashboard(
 
 _JS = """
 const cards = [...document.querySelectorAll('.card')];
+const picks = [...document.querySelectorAll('[data-pick]')];
+const picksHost = document.querySelector('.picks');
 const life = document.getElementById('life');
 const lifeOut = document.getElementById('lifeOut');
 const q = document.getElementById('q');
@@ -259,14 +294,60 @@ const model = document.getElementById('model');
 const sort = document.getElementById('sort');
 const off = new Set();
 
-// Same formula as value_per_remaining_hour in dashboard.py. Keep in step.
-function value(card, lifeHours) {
-  const h = card.dataset.hours;
-  if (h === '') return null;
-  const p = card.dataset.priceCents;
-  if (p === '') return null;
-  const cents = Number(p);
-  return (cents / 100) / Math.max(lifeHours - Number(h), 1);
+// Pure, DOM-free mirrors of value_per_remaining_hour / top_picks in
+// dashboard.py. Kept free of document/card so both the browse cards and the
+// Top Picks strip call the exact same ranking logic, and so a test runner
+// (e.g. Node) can exercise them directly on plain {hours, priceCents}
+// objects without a browser. `hours` and `priceCents` here are numbers or
+// null — never the empty string the dataset attributes carry.
+function computeValue(hours, priceCents, lifeHours) {
+  if (hours === null || priceCents === null) return null;
+  return (priceCents / 100) / Math.max(lifeHours - hours, 1);
+}
+
+function valueLabel(hours, priceCents, lifeHours) {
+  // Missing hours and missing price are different failures and must read
+  // differently — collapsing both into "hours unknown" contradicts a card
+  // that plainly states its own hours.
+  if (hours === null) return 'hours unknown';
+  if (priceCents === null) return 'price unknown';
+  const v = computeValue(hours, priceCents, lifeHours);
+  return '$' + v.toLocaleString(undefined, {minimumFractionDigits: 2,
+                                             maximumFractionDigits: 2}) + '/hr';
+}
+
+// Ascending dollars-per-remaining-hour; unknown value sorts last. Matches
+// top_picks()'s sort key in dashboard.py exactly.
+function compareByValue(a, b, lifeHours) {
+  const av = computeValue(a.hours, a.priceCents, lifeHours);
+  const bv = computeValue(b.hours, b.priceCents, lifeHours);
+  if (av === null) return bv === null ? 0 : 1;
+  if (bv === null) return -1;
+  return av - bv;
+}
+
+function readNum(raw) {
+  return raw === '' ? null : Number(raw);
+}
+
+function factsOf(el) {
+  return {hours: readNum(el.dataset.hours), priceCents: readNum(el.dataset.priceCents)};
+}
+
+// Re-labels and re-sorts the Top Picks strip. Without this the strip kept
+// the server-side order and server-side $/hr text no matter where the
+// slider moved, contradicting the browse list it sits next to.
+function applyPicks(lifeHours) {
+  for (const li of picks) {
+    const valueEl = li.querySelector('.pick-value');
+    if (valueEl) {
+      const {hours, priceCents} = factsOf(li);
+      valueEl.textContent = valueLabel(hours, priceCents, lifeHours);
+    }
+  }
+  if (!picksHost) return;
+  const ranked = [...picks].sort((a, b) => compareByValue(factsOf(a), factsOf(b), lifeHours));
+  for (const li of ranked) picksHost.appendChild(li);
 }
 
 function apply() {
@@ -280,24 +361,23 @@ function apply() {
     const modelOk = !wanted || card.dataset.model === wanted;
     const verdictOk = !off.has(card.dataset.verdict);
     card.hidden = !(hit && modelOk && verdictOk);
-    const v = value(card, lifeHours);
     const chip = card.querySelector('.value-chip');
-    if (chip) chip.textContent = v === null ? 'hours unknown'
-      : '$' + v.toLocaleString(undefined, {minimumFractionDigits: 2,
-                                           maximumFractionDigits: 2}) + '/hr';
+    if (chip) {
+      const {hours, priceCents} = factsOf(card);
+      chip.textContent = valueLabel(hours, priceCents, lifeHours);
+    }
   }
 
   const key = sort.value;
   const shown = cards.filter(c => !c.hidden);
   shown.sort((a, b) => {
-    if (key === 'value') {
-      const av = value(a, lifeHours), bv = value(b, lifeHours);
-      if (av === null) return bv === null ? 0 : 1;   // unknown hours sort last
-      if (bv === null) return -1;
-      return av - bv;
-    }
+    if (key === 'value') return compareByValue(factsOf(a), factsOf(b), lifeHours);
     if (key === 'confidence') return b.dataset.confidence - a.dataset.confidence;
-    if (key === 'price') return a.dataset.priceCents - b.dataset.priceCents;
+    if (key === 'price') {
+      if (a.dataset.priceCents === '') return b.dataset.priceCents === '' ? 0 : 1;
+      if (b.dataset.priceCents === '') return -1;
+      return a.dataset.priceCents - b.dataset.priceCents;
+    }
     if (key === 'hours') {
       if (a.dataset.hours === '') return b.dataset.hours === '' ? 0 : 1;
       if (b.dataset.hours === '') return -1;
@@ -307,6 +387,8 @@ function apply() {
   });
   const host = document.getElementById('cards');
   for (const card of shown) host.appendChild(card);
+
+  applyPicks(lifeHours);
 }
 
 for (const el of [q, model, sort, life]) el.addEventListener('input', apply);

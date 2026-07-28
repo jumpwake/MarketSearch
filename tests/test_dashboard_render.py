@@ -32,6 +32,20 @@ def _value_chip_text(card_html):
     return match.group(1)
 
 
+def _pick_html(html, listing_id):
+    match = re.search(
+        rf'<li data-pick="{re.escape(listing_id)}".*?</li>', html, re.S,
+    )
+    assert match, f"no pick found for listing {listing_id!r}"
+    return match.group(0)
+
+
+def _pick_value_text(pick_html):
+    match = re.search(r'<span class="pick-value">(.*?)</span>', pick_html, re.S)
+    assert match, "pick-value span not found in pick"
+    return match.group(1)
+
+
 def test_a_script_tag_in_a_title_is_escaped():
     """Titles come from Facebook. They are not trusted."""
     html = render([judged("1", "bobcat-t770", 3_000_000, 2200,
@@ -107,6 +121,49 @@ def test_unknown_price_renders_as_empty_not_zero():
     html = render([judged("1", "bobcat-t770", None, 2200)])
     assert 'data-price-cents=""' in html
     assert 'data-price-cents="0"' not in html
+
+
+def test_unknown_price_label_says_price_unknown_not_hours_unknown():
+    """A card with known hours and no price must not read 'hours unknown' —
+    that would contradict the hours the card plainly states elsewhere."""
+    html = render([judged("1", "bobcat-t770", None, 2200)])
+    card = _card_html(html, "1")
+    text = _value_chip_text(card).lower()
+    assert "price unknown" in text
+    assert "hours unknown" not in text
+
+
+def test_unknown_price_label_on_a_top_pick_says_price_unknown():
+    html = render([judged("1", "bobcat-t770", None, 2200)])
+    pick = _pick_html(html, "1")
+    text = _pick_value_text(pick).lower()
+    assert "price unknown" in text
+    assert "hours unknown" not in text
+
+
+def test_picks_carry_the_data_the_client_script_sorts_on():
+    """Top Picks <li> elements need the same data-hours / data-price-cents
+    attributes as browse cards, or the slider has nothing to re-sort."""
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200)])
+    pick = _pick_html(html, "1")
+    assert 'data-hours="2200"' in pick
+    assert 'data-price-cents="3950000"' in pick
+
+
+def test_the_slider_bounds_contain_an_out_of_range_life_hours():
+    """--life-hours outside the default 3000-12000 slider range must widen
+    the slider rather than let the browser silently clamp it out of sync
+    with the server-rendered Top Picks numbers."""
+    html = render([judged("1", "bobcat-t770", 3_000_000, 2200)], life_hours=20000)
+    assert 'min="3000"' in html
+    assert 'max="20000"' in html
+    assert 'value="20000"' in html
+
+
+def test_the_slider_bounds_stay_at_the_defaults_within_range():
+    html = render([judged("1", "bobcat-t770", 3_000_000, 2200)], life_hours=8000)
+    assert 'min="3000"' in html
+    assert 'max="12000"' in html
 
 
 def test_a_missing_thumbnail_renders_a_placeholder():

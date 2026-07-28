@@ -15,7 +15,7 @@ from typing import Callable
 
 from jinja2 import Environment, select_autoescape
 
-from marketsearch.format import attribute_rows, dollars, hours_text, yes_no
+from marketsearch.format import attribute_rows, dollars
 from marketsearch.store import ExtractionRow, ListingRow
 
 log = logging.getLogger(__name__)
