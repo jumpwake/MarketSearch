@@ -182,6 +182,10 @@ class Scanner:
         if isinstance(decision, Rejection):
             if not self._dry_run:
                 self._store.upsert_listing(listing, fp)
+                # A listing accepted on an earlier run and rejected on this one
+                # must not keep the old run's model label — otherwise it shows
+                # up in reports under a model that did not reject it.
+                self._store.clear_assignment(listing.listing_id)
             counters.prefiltered += 1
             self._set_stage(listing.listing_id, "prefiltered_out", decision.reason)
             return 0

@@ -7,7 +7,8 @@ you want to see what the current config did to real listings:
 
 The report shows every listing Claude actually read (with its verdict and
 reasoning), everything the prefilter dropped and why, and the near-miss check
-that tells you whether the title filter is too tight.
+that tells you whether the model catalog's keywords or price bands are too
+tight.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from marketsearch.config import load_config
+from marketsearch.prefilter import identify_model
 from marketsearch.sources.parse import ITEM_URL
 
 
@@ -137,12 +139,30 @@ def build(db_path: Path, config_path: Path) -> str:
         lines.append("")
         return lines
 
+    # Bucketed by re-running the *current* catalog's `identify_model` against
+    # the stored title, not by the stored `model_name` column or the stored
+    # `reject_reason` text. Neither is trustworthy for this: under pooling a
+    # rejected listing carries no model label (the pipeline clears it) while
+    # the v2 migration backfilled `model_name` on every legacy row regardless
+    # of stage, and `reject_reason` on old rows still carries the retired
+    # per-search filter's wording ("title matched none of: …"), which never
+    # names a model at all. Recomputing from live keywords works uniformly on
+    # both eras and keeps this section and "Matched no model at all" below in
+    # agreement — every dropped row lands in exactly one bucket.
+    all_dropped = conn.execute(
+        "select * from listings where stage='prefiltered_out' order by price_cents desc"
+    ).fetchall()
+
+    def identified_model(title: str | None) -> str | None:
+        lowered = (title or "").lower()
+        for watchlist in cfg.watchlists:
+            match = identify_model(lowered, watchlist)
+            if match is not None:
+                return match.name
+        return None
+
     for watchlist, model in catalog:
-        rows = conn.execute(
-            "select * from listings where model_name=? and stage='prefiltered_out' "
-            "order by price_cents desc",
-            (model.name,),
-        ).fetchall()
+        rows = [r for r in all_dropped if identified_model(r["title"]) == model.name]
         kept = conn.execute(
             "select count(*) from listings where model_name=? and stage!='prefiltered_out'",
             (model.name,),
@@ -159,27 +179,28 @@ def build(db_path: Path, config_path: Path) -> str:
         ]
         out += dropped_table(rows)
 
-    unassigned = conn.execute(
-        "select * from listings where model_name is null and stage='prefiltered_out' "
-        "order by price_cents desc"
-    ).fetchall()
+    unassigned = [r for r in all_dropped if identified_model(r["title"]) is None]
     out += [
         "### Matched no model at all",
         "",
-        "Pooled from some query, offered to every model, accepted by none.",
+        "No watchlist's keywords identify this title today — includes both",
+        "listings excluded by a junk term and listings pooled from some query",
+        "but claimed by nothing in the catalog.",
         f"**{len(unassigned)} dropped.**",
         "",
     ]
     out += dropped_table(unassigned)
 
     # The check that matters: did the catalog throw away a real match? Under
-    # pooling a dropped listing belongs to no model, so scan every dropped row
-    # for every model's number rather than scoping by the row's label.
+    # pooling a dropped listing carries no model label, so scan every dropped
+    # row for every model's number rather than scoping by the row's label —
+    # reusing `all_dropped` and the same `identified_model` bucketing as above
+    # so this section and the tables before it never disagree about which
+    # model (if any) a row was actually measured against. A row that
+    # `identified_model` already places in this model's own table above is
+    # excluded here on purpose: it was already shown once, and the point of
+    # this check is titles the catalog's *exact* keywords missed entirely.
     out += ["---", "", "## Near-miss check", "", ""]
-    all_dropped = conn.execute(
-        "select title,price_cents,reject_reason,model_name from listings "
-        "where stage='prefiltered_out'"
-    ).fetchall()
     any_near = False
     for _watchlist, model in catalog:
         numbers = sorted({
@@ -192,7 +213,7 @@ def build(db_path: Path, config_path: Path) -> str:
         # six spellings of one model number is one near-miss, not six.
         near = [
             r for r in all_dropped
-            if r["model_name"] != model.name
+            if identified_model(r["title"]) != model.name
             and any(d in (r["title"] or "").lower() for d in numbers)
         ]
         if near:

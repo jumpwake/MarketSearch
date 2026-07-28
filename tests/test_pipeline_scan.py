@@ -431,3 +431,39 @@ def test_a_pending_listing_moves_to_the_watchlist_that_accepts_it_on_retry(store
     row = store.get_listing("re1")
     assert row.watchlist_name == "catalog-b"
     assert row.model_name == "model-b"
+
+
+def test_a_previously_accepted_listing_that_is_later_rejected_loses_its_model_label(
+    store: Store,
+):
+    """`upsert_listing` alone cannot clear a stale label: `ON CONFLICT` never
+    touches `watchlist_name`/`model_name`, so a listing accepted on one run
+    and rejected on a later one (e.g. a retried `pending` row after the price
+    band tightened) must not keep reporting under the model that did not
+    reject it."""
+    machine = listing("re2", title="2019 Bobcat T770", price_cents=3_800_000)
+
+    def one_model_watchlist(price_min: int, price_max: int) -> Config:
+        return watchlist_config(watchlists=[{
+            "name": "track-loaders", "queries": ["Bobcat T770"],
+            "models": [{"name": "bobcat-t770", "keywords": ["t770"],
+                       "price_min_cents": price_min, "price_max_cents": price_max}],
+            "exclude": [], "on_unknown": "alert", "criteria": "crit",
+        }])
+
+    accepting = one_model_watchlist(1_500_000, 5_300_000)
+    failing = FakeExtractor(error=ExtractionError("api down"))
+    Scanner(accepting, store, FakeSource([machine]), failing).scan()
+    row = store.get_listing("re2")
+    assert row.stage == "pending"
+    assert row.watchlist_name == "track-loaders"
+    assert row.model_name == "bobcat-t770"
+
+    # Band tightens above this listing's price; the retry now rejects it.
+    rejecting = one_model_watchlist(6_000_000, 9_000_000)
+    working = FakeExtractor()
+    Scanner(rejecting, store, FakeSource([machine]), working).scan()
+    row = store.get_listing("re2")
+    assert row.stage == "prefiltered_out"
+    assert row.watchlist_name is None
+    assert row.model_name is None

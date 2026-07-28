@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from marketsearch.config import ModelConfig, WatchlistConfig
 from marketsearch.models import RawListing
-from marketsearch.prefilter import Assignment, Rejection, assign, identify_model, offer
+from marketsearch.prefilter import (
+    NO_MODEL,
+    Assignment,
+    Rejection,
+    assign,
+    identify_model,
+    offer,
+)
 
 
 def model(name, keywords, lo, hi):
@@ -180,6 +187,62 @@ def test_exclusion_terms_match_at_a_punctuation_boundary():
     )
     result = offer(wl_listing("Bobcat T770 - parts only, no engine", 4_000_000), junk)
     assert isinstance(result, Rejection)
+
+
+def test_bobcat_763_is_not_identified_as_the_t76_track_loader():
+    """Regression: config.yaml used to carry a bare 't 76' keyword. It matched
+    'boBCAT 763' across the word boundary (the 't' ending "bobcat", a space,
+    then the '76' that starts '763') and pulled a wheeled Bobcat 763 skid
+    steer into the T76 track-loader band. The fix anchors on 'bobcat t 76' —
+    a real title still spelled "Bobcat T 76" keeps matching, but "Bobcat 763"
+    no longer does."""
+    t76 = WatchlistConfig(
+        name="track-loaders", queries=["Bobcat T76 track loader"],
+        models=[model("bobcat-t76", ["t76", "t-76", "bobcat t 76"], 25000, 60000)],
+        exclude=["s770", "s750", "s870", "s320"],
+        criteria="c",
+    )
+    listing = wl_listing("Bobcat 763 skid steer", 1_550_000)  # inside the t76 band
+    assert identify_model(listing.title.lower(), t76) is None
+    result = assign(listing, [t76])
+    assert isinstance(result, Rejection)
+    assert result.reason == NO_MODEL
+
+
+def test_bobcat_863_is_not_identified_as_the_t86_track_loader():
+    """Same bug, the T86 side: a bare 't 86' keyword matched 'boBCAT 863' and
+    pulled a wheeled Bobcat 863 skid steer into the T86 band."""
+    t86 = WatchlistConfig(
+        name="track-loaders", queries=["Bobcat T86 track loader"],
+        models=[model("bobcat-t86", ["t86", "t-86", "bobcat t 86"], 30000, 70000)],
+        exclude=["s770", "s750", "s870", "s320"],
+        criteria="c",
+    )
+    listing = wl_listing("Low hour Bobcat 863 skid steer", 1_290_000)  # inside the t86 band
+    assert identify_model(listing.title.lower(), t86) is None
+    result = assign(listing, [t86])
+    assert isinstance(result, Rejection)
+    assert result.reason == NO_MODEL
+
+
+def test_bobcat_t_76_with_a_space_still_matches():
+    """The anchored keyword must not lose the genuine spelling it exists to
+    catch — a title actually written 'Bobcat T 76'."""
+    t76 = WatchlistConfig(
+        name="track-loaders", queries=["Bobcat T76 track loader"],
+        models=[model("bobcat-t76", ["t76", "t-76", "bobcat t 76"], 25000, 60000)],
+        criteria="c",
+    )
+    assert identify_model("2021 bobcat t 76 track loader", t76).name == "bobcat-t76"
+
+
+def test_bobcat_t_86_with_a_space_still_matches():
+    t86 = WatchlistConfig(
+        name="track-loaders", queries=["Bobcat T86 track loader"],
+        models=[model("bobcat-t86", ["t86", "t-86", "bobcat t 86"], 30000, 70000)],
+        criteria="c",
+    )
+    assert identify_model("2021 bobcat t 86 track loader", t86).name == "bobcat-t86"
 
 
 def test_earlier_models_win_ties():

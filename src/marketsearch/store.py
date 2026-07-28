@@ -314,6 +314,21 @@ class Store:
         )
         self._conn.commit()
 
+    def clear_assignment(self, listing_id: str) -> None:
+        """Strip any watchlist/model label from a listing no watchlist accepts.
+
+        `upsert_listing` on its own cannot do this: `ON CONFLICT` never touches
+        `watchlist_name`/`model_name`, so a listing accepted on an earlier run
+        and rejected on this one would otherwise keep its old model label and
+        show up in reports under a model that did not reject it.
+        """
+        self._conn.execute(
+            "UPDATE listings SET watchlist_name = NULL, model_name = NULL "
+            "WHERE listing_id = ?",
+            (listing_id,),
+        )
+        self._conn.commit()
+
     def prefiltered_listings(self) -> list[ListingRow]:
         """Every listing rejected before extraction — the requeue corpus."""
         cur = self._conn.execute(
