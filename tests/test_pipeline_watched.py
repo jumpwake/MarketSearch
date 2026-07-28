@@ -90,6 +90,18 @@ def test_a_never_seen_saved_listing_is_extracted_for_a_baseline(store: Store):
     assert outcome.changes == []  # first sight is not a change
 
 
+def test_a_never_seen_listing_skips_baseline_without_a_watchlist_catalog(store: Store):
+    """The live config.yaml has `searches:` and no `watchlists:` until Task 7
+    migrates it. One saved listing with nothing to judge it against must not
+    crash the whole sync — it should be skipped, not guessed at."""
+    extractor = FakeExtractor()
+    outcome = syncer(store, FakeWatchSource(saved=[listing("9")]), extractor).sync()
+    assert outcome.changes == []
+    assert outcome.errors == 0
+    assert extractor.calls == 0
+    assert store.get_listing("9") is None
+
+
 def test_no_change_produces_no_card(store: Store):
     seed(store, listing("1"))
     outcome = syncer(store, FakeWatchSource(saved=[listing("1")])).sync()

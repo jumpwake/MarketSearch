@@ -403,3 +403,35 @@ def test_cheap_grapple_naming_a_machine_lands_in_attachments(store: Store):
 
     assert row.model_name == "root-grapple"
     assert row.watchlist_name == "attachments"
+
+
+def test_a_pending_listing_moves_to_the_watchlist_that_accepts_it_on_retry(store: Store):
+    """`upsert_listing` leaves an existing row's watchlist/model alone on
+    conflict — only the explicit `reassign` call in `_process` moves it. A
+    listing stuck in `pending` (extraction failed) must follow the config's
+    *current* verdict when it is retried, not the one recorded when it was
+    first seen."""
+    machine = listing("re1", title="2019 Bobcat T770", price_cents=3_800_000)
+
+    def one_watchlist_named(name: str, model_name: str) -> Config:
+        return watchlist_config(watchlists=[{
+            "name": name, "queries": ["Bobcat T770"],
+            "models": [{"name": model_name, "keywords": ["t770"],
+                       "price_min_cents": 1_500_000, "price_max_cents": 5_300_000}],
+            "exclude": [], "on_unknown": "alert", "criteria": "crit",
+        }])
+
+    cfg_a = one_watchlist_named("catalog-a", "model-a")
+    failing = FakeExtractor(error=ExtractionError("api down"))
+    Scanner(cfg_a, store, FakeSource([machine]), failing).scan()
+    row = store.get_listing("re1")
+    assert row.stage == "pending"
+    assert row.watchlist_name == "catalog-a"
+    assert row.model_name == "model-a"
+
+    cfg_b = one_watchlist_named("catalog-b", "model-b")
+    working = FakeExtractor()
+    Scanner(cfg_b, store, FakeSource([machine]), working).scan()
+    row = store.get_listing("re1")
+    assert row.watchlist_name == "catalog-b"
+    assert row.model_name == "model-b"

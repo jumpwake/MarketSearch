@@ -308,13 +308,17 @@ class WatchSyncer:
         self._extractor = extractor
         self._dry_run = dry_run
 
-    def _assign(self, listing: RawListing) -> tuple[WatchlistConfig, str]:
+    def _assign(self, listing: RawListing) -> tuple[WatchlistConfig, str] | None:
         """Pick the watchlist whose criteria judge a saved listing.
 
         A machine saved while browsing may match no catalog at all; the first
         watchlist's criteria are a reasonable default and the alert still
-        carries the full attribute table.
+        carries the full attribute table. `None` means there is no catalog to
+        fall back to at all — a searches-only config, mid-migration (Tasks
+        4-6) — and the caller must skip rather than guess.
         """
+        if not self._config.watchlists:
+            return None
         decision = assign(listing, self._config.watchlists)
         if isinstance(decision, Assignment):
             return decision.watchlist, decision.model.name
@@ -380,7 +384,16 @@ class WatchSyncer:
     def _baseline(self, listing: RawListing) -> None:
         """First sight of a listing saved while browsing. Establish a record so
         later runs have something to diff against."""
-        watchlist, model_name = self._assign(listing)
+        assignment = self._assign(listing)
+        if assignment is None:
+            log.warning(
+                "no watchlist is configured; skipping baseline for saved "
+                "listing %s",
+                listing.listing_id,
+            )
+            return
+
+        watchlist, model_name = assignment
         fp = fingerprint(
             listing.title, listing.price_cents, listing.seller_name, listing.location
         )
