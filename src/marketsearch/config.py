@@ -86,6 +86,45 @@ class SearchConfig(BaseModel):
         return [v.strip().lower() for v in values]
 
 
+class ModelConfig(BaseModel):
+    """One machine or attachment the user watches, with its own price band."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    keywords: list[str]
+    price_min_cents: int
+    price_max_cents: int
+
+    @field_validator("keywords")
+    @classmethod
+    def _lowercase(cls, values: list[str]) -> list[str]:
+        return [v.strip().lower() for v in values]
+
+
+class WatchlistConfig(BaseModel):
+    """A catalog of models sharing one set of criteria, exclusions, and queries.
+
+    Queries are discovery only. Every query's results are checked against every
+    model here, which is what stops one query's filter from discarding another
+    query's machine.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    queries: list[str]
+    models: list[ModelConfig]
+    exclude: list[str] = []
+    on_unknown: Literal["alert", "skip"] = "alert"
+    criteria: str
+
+    @field_validator("exclude")
+    @classmethod
+    def _lowercase(cls, values: list[str]) -> list[str]:
+        return [v.strip().lower() for v in values]
+
+
 class Config(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -94,7 +133,8 @@ class Config(BaseModel):
     schedule: ScheduleConfig = ScheduleConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     notifications: NotificationConfig
-    searches: list[SearchConfig]
+    searches: list[SearchConfig] = []
+    watchlists: list[WatchlistConfig] = []
 
 
 def _normalise_search(raw: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +145,34 @@ def _normalise_search(raw: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError(f"search '{out.get('name')}' needs price.min and price.max")
     out["price_min_cents"] = int(round(float(price["min"]) * 100))
     out["price_max_cents"] = int(round(float(price["max"]) * 100))
+    return out
+
+
+def _normalise_watchlist(raw: dict[str, Any]) -> dict[str, Any]:
+    """Convert the human-friendly YAML shape into WatchlistConfig field names."""
+    out = dict(raw)
+    name = out.get("name")
+
+    if not out.get("queries"):
+        raise ConfigError(f"watchlist '{name}' needs at least one query")
+
+    models = out.get("models") or []
+    if not models:
+        raise ConfigError(f"watchlist '{name}' needs at least one model")
+
+    normalised = []
+    for model in models:
+        model = dict(model)
+        price = model.pop("price", None) or {}
+        if "min" not in price or "max" not in price:
+            raise ConfigError(
+                f"model '{model.get('name')}' needs price.min and price.max"
+            )
+        model["price_min_cents"] = int(round(float(price["min"]) * 100))
+        model["price_max_cents"] = int(round(float(price["max"]) * 100))
+        normalised.append(model)
+
+    out["models"] = normalised
     return out
 
 
@@ -122,13 +190,29 @@ def load_config(path: Path) -> Config:
 
     raw = dict(raw)
     raw["searches"] = [_normalise_search(s) for s in raw.get("searches") or []]
-    if not raw["searches"]:
-        raise ConfigError("config must define at least one search")
+    raw["watchlists"] = [_normalise_watchlist(w) for w in raw.get("watchlists") or []]
+
+    if not raw["searches"] and not raw["watchlists"]:
+        raise ConfigError("config must define at least one search or watchlist")
 
     names = [s["name"] for s in raw["searches"]]
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
         raise ConfigError(f"duplicate search name(s): {', '.join(sorted(duplicates))}")
+
+    watchlist_names = [w["name"] for w in raw["watchlists"]]
+    duplicates = {n for n in watchlist_names if watchlist_names.count(n) > 1}
+    if duplicates:
+        raise ConfigError(
+            f"duplicate watchlist name(s): {', '.join(sorted(duplicates))}"
+        )
+
+    # Model names label rows in the database, so they must be unique globally,
+    # not merely within their watchlist.
+    model_names = [m["name"] for w in raw["watchlists"] for m in w["models"]]
+    duplicates = {n for n in model_names if model_names.count(n) > 1}
+    if duplicates:
+        raise ConfigError(f"duplicate model name(s): {', '.join(sorted(duplicates))}")
 
     try:
         return Config.model_validate(raw)

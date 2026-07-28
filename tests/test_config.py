@@ -112,3 +112,102 @@ extraction:
 """
     cfg = load_config(write(tmp_path, body))
     assert cfg.extraction.max_listings_per_search == 60
+
+
+WATCHLIST = """
+account:
+  profile_dir: C:\\MarketSearch\\chrome-profile
+location:
+  anchor: "Kansas City, MO"
+  radius_miles: 250
+notifications:
+  email:
+    to: me@example.com
+    from: bot@example.com
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    username: bot@example.com
+    password_env: MARKETSEARCH_SMTP_PASSWORD
+  sms:
+    to: "+15555550100"
+    twilio_from: "+15555550101"
+    account_sid_env: TWILIO_ACCOUNT_SID
+    auth_token_env: TWILIO_AUTH_TOKEN
+watchlists:
+  - name: track-loaders
+    criteria: "Under 3000 engine hours."
+    exclude: ["Wanted", "s770"]
+    queries: ["Bobcat T770", "Bobcat T86 track loader"]
+    models:
+      - {name: bobcat-t770, keywords: ["T770", "t-770"], price: {min: 15000, max: 53000}}
+      - {name: bobcat-t750, keywords: ["t750"], price: {min: 15000, max: 50000}}
+  - name: attachments
+    criteria: "Skid steer root grapple."
+    queries: ["skid steer root grapple"]
+    models:
+      - {name: root-grapple, keywords: ["grapple"], price: {min: 800, max: 6000}}
+"""
+
+
+def test_loads_watchlists(tmp_path: Path):
+    cfg = load_config(write(tmp_path, WATCHLIST))
+    assert [w.name for w in cfg.watchlists] == ["track-loaders", "attachments"]
+    assert cfg.watchlists[0].queries == ["Bobcat T770", "Bobcat T86 track loader"]
+    assert [m.name for m in cfg.watchlists[0].models] == ["bobcat-t770", "bobcat-t750"]
+
+
+def test_model_prices_convert_dollars_to_cents(tmp_path: Path):
+    cfg = load_config(write(tmp_path, WATCHLIST))
+    model = cfg.watchlists[0].models[0]
+    assert model.price_min_cents == 1_500_000
+    assert model.price_max_cents == 5_300_000
+
+
+def test_keywords_and_exclude_are_lowercased(tmp_path: Path):
+    cfg = load_config(write(tmp_path, WATCHLIST))
+    assert cfg.watchlists[0].models[0].keywords == ["t770", "t-770"]
+    assert cfg.watchlists[0].exclude == ["wanted", "s770"]
+
+
+def test_on_unknown_defaults_to_alert(tmp_path: Path):
+    cfg = load_config(write(tmp_path, WATCHLIST))
+    assert cfg.watchlists[0].on_unknown == "alert"
+
+
+def test_duplicate_watchlist_names_rejected(tmp_path: Path):
+    body = WATCHLIST.replace("name: attachments", "name: track-loaders")
+    with pytest.raises(ConfigError, match="duplicate watchlist name"):
+        load_config(write(tmp_path, body))
+
+
+def test_duplicate_model_names_rejected_across_watchlists(tmp_path: Path):
+    body = WATCHLIST.replace("name: root-grapple", "name: bobcat-t770")
+    with pytest.raises(ConfigError, match="duplicate model name"):
+        load_config(write(tmp_path, body))
+
+
+def test_watchlist_needs_at_least_one_model(tmp_path: Path):
+    body = WATCHLIST.replace(
+        '      - {name: root-grapple, keywords: ["grapple"], price: {min: 800, max: 6000}}',
+        "",
+    )
+    with pytest.raises(ConfigError, match="at least one model"):
+        load_config(write(tmp_path, body))
+
+
+def test_watchlist_needs_at_least_one_query(tmp_path: Path):
+    body = WATCHLIST.replace('queries: ["skid steer root grapple"]', "queries: []")
+    with pytest.raises(ConfigError, match="at least one query"):
+        load_config(write(tmp_path, body))
+
+
+def test_model_needs_a_price_band(tmp_path: Path):
+    body = WATCHLIST.replace(', price: {min: 800, max: 6000}', "")
+    with pytest.raises(ConfigError, match="price.min and price.max"):
+        load_config(write(tmp_path, body))
+
+
+def test_legacy_searches_config_still_loads(tmp_path: Path):
+    cfg = load_config(write(tmp_path, MINIMAL))
+    assert len(cfg.searches) == 1
+    assert cfg.watchlists == []
