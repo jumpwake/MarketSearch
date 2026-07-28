@@ -69,11 +69,22 @@ def test_grapple_model_resolves_to_the_attachments_watchlist():
     assert watchlist.name == "attachments"
 
 
-def test_watchlist_lookup_of_a_none_model_name_returns_none_not_an_error():
-    """A listing baselined by WatchSyncer._baseline with no matching model in
-    any watchlist is stored with model_name=None — a reachable state, not
-    just a theoretical one. The lookup must not raise for it."""
-    assert _watchlist_by_name(watchlist_config(), None) is None
+def test_watchlist_lookup_contract_for_inputs_naming_no_model():
+    """Contract test, not a guard-regression test: today's `if model_name is
+    None: return None` guard in `_watchlist_by_name` is redundant, because the
+    loop that follows would fall through to `return None` for a `None` input
+    on its own (`None` never equals a string `model.name`). This does *not*
+    prove the guard is load-bearing — it pins the observable contract instead:
+    any input that names no model in any watchlist must resolve to `None`
+    rather than raise, including `None` itself (the state WatchSyncer._baseline
+    can store — see the reachability note in the shakedown module docstring),
+    an empty string, and an ordinary unknown model name. A future refactor
+    that assumes `model_name` is always a matched string — e.g. calling
+    `model_name.lower()` or indexing into a lookup table — would break this
+    test even though it would not break the guard-removal experiment."""
+    cfg = watchlist_config()
+    for absent in (None, "", "newholland-c"):
+        assert _watchlist_by_name(cfg, absent) is None
 
 
 def test_parse_since_days():
