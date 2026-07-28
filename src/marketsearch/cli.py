@@ -10,6 +10,7 @@ import typer
 from dotenv import load_dotenv
 
 from marketsearch.config import Config, ConfigError, load_config
+from marketsearch.dashboard import DEFAULT_LIFE_HOURS
 from marketsearch.extract import Extractor
 from marketsearch.logging_setup import setup_logging
 from marketsearch.notify.delivery import (
@@ -313,6 +314,48 @@ def requeue_command(
         rows = run_requeue(store, cfg, dry_run=dry_run)
 
     typer.echo(format_requeue(rows, dry_run))
+
+
+@app.command()
+def dashboard(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    out: Path = typer.Option(Path("dashboard.html"), "--out"),
+    since: str = typer.Option("365d", "--since", help="e.g. 90d, 36h."),
+    life_hours: int = typer.Option(
+        DEFAULT_LIFE_HOURS, "--life-hours",
+        help="Assumed usable machine life, for the value ranking.",
+    ),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Browse every judged listing, ranked by value, for tuning criteria."""
+    import webbrowser
+    from datetime import datetime, timezone
+
+    from marketsearch.dashboard import JudgedListing, render_dashboard
+    from marketsearch.shakedown import parse_since
+
+    cfg = _load(config)
+    cutoff = parse_since(since).isoformat()
+
+    with Store(db) as store:
+        store.initialize()
+        rows = [
+            JudgedListing(listing=listing, detail=detail, extraction=extraction)
+            for listing, detail, extraction in store.listings_with_details(
+                None, cutoff
+            )
+            if extraction is not None
+        ]
+
+    html = render_dashboard(
+        rows, cfg, datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        life_hours,
+    )
+    out.write_text(html, encoding="utf-8")
+    typer.echo(f"{len(rows)} judged listing(s) — wrote {out}")
+    if open_browser:
+        webbrowser.open(out.resolve().as_uri())
 
 
 # Without this, `python -m marketsearch.cli <command>` imports the module and

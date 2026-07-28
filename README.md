@@ -128,6 +128,11 @@ Set `notifications.enabled: true` in `config.yaml`. That's it.
 | `marketsearch test-search "QUERY"` | Live search, prints parsed results. |
 | `marketsearch login` | Re-authenticate after a checkpoint. |
 
+`marketsearch dashboard` — browse every judged listing in a local HTML page,
+ranked by dollars per remaining engine hour. Slide the assumed-life control to
+see how sensitive the ranking is to that assumption. Read-only; regenerate by
+re-running it.
+
 **Favourites.** Tap Save on any Marketplace listing, from any device signed
 into the same Facebook account. The next run picks it up and starts reporting
 price drops, description edits, and removals. Un-save to stop.
