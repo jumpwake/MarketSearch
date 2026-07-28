@@ -73,7 +73,7 @@ def test_title_matchers_are_lowercased(tmp_path: Path):
     assert cfg.searches[0].title_must_match == ["t770"]
 
 
-def test_on_unknown_defaults_to_alert(tmp_path: Path):
+def test_searches_on_unknown_defaults_to_alert(tmp_path: Path):
     cfg = load_config(write(tmp_path, MINIMAL))
     assert cfg.searches[0].on_unknown == "alert"
 
@@ -169,7 +169,7 @@ def test_keywords_and_exclude_are_lowercased(tmp_path: Path):
     assert cfg.watchlists[0].exclude == ["wanted", "s770"]
 
 
-def test_on_unknown_defaults_to_alert(tmp_path: Path):
+def test_watchlist_on_unknown_defaults_to_alert(tmp_path: Path):
     cfg = load_config(write(tmp_path, WATCHLIST))
     assert cfg.watchlists[0].on_unknown == "alert"
 
