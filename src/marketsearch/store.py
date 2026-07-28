@@ -17,7 +17,7 @@ from typing import Iterable
 
 from marketsearch.models import ListingDetail, RawListing
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS listings (
     listing_id     TEXT PRIMARY KEY,
     search_name    TEXT NOT NULL,
+    watchlist_name TEXT,
+    model_name     TEXT,
     title          TEXT NOT NULL,
     price_cents    INTEGER,
     location       TEXT,
@@ -141,6 +143,8 @@ class ListingRow:
     last_seen_at: str
     last_change_check_at: str | None
     extraction_attempts: int
+    watchlist_name: str | None = None
+    model_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +177,8 @@ def _row_to_listing(row: sqlite3.Row) -> ListingRow:
         last_seen_at=row["last_seen_at"],
         last_change_check_at=row["last_change_check_at"],
         extraction_attempts=row["extraction_attempts"],
+        watchlist_name=row["watchlist_name"],
+        model_name=row["model_name"],
     )
 
 
@@ -199,8 +205,47 @@ class Store:
     def initialize(self) -> None:
         self._conn.executescript(_SCHEMA)
         cur = self._conn.execute("SELECT version FROM schema_version")
-        if cur.fetchone() is None:
-            self._conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        row = cur.fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+            )
+            self._conn.commit()
+            return
+        self._migrate(row["version"])
+
+    def _migrate(self, version: int) -> None:
+        """Bring an existing database up to SCHEMA_VERSION, in place.
+
+        Never rebuild: the extractions in here cost real money to produce.
+        """
+        if version >= SCHEMA_VERSION:
+            return
+
+        if version < 2:
+            columns = {
+                r["name"] for r in self._conn.execute("PRAGMA table_info(listings)")
+            }
+            if "watchlist_name" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE listings ADD COLUMN watchlist_name TEXT"
+                )
+            if "model_name" not in columns:
+                self._conn.execute("ALTER TABLE listings ADD COLUMN model_name TEXT")
+            # v1 stored the claiming search's name. That name was always the
+            # model in practice; only the grapple search belonged elsewhere.
+            self._conn.execute(
+                """
+                UPDATE listings
+                   SET model_name = search_name,
+                       watchlist_name = CASE WHEN search_name = 'root-grapple'
+                                             THEN 'attachments'
+                                             ELSE 'track-loaders' END
+                 WHERE model_name IS NULL
+                """
+            )
+
+        self._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         self._conn.commit()
 
     # ---- listing ledger -------------------------------------------------
@@ -220,14 +265,22 @@ class Store:
             found.update(r["listing_id"] for r in cur.fetchall())
         return found
 
-    def upsert_listing(self, listing: RawListing, search_name: str, fp: str) -> None:
+    def upsert_listing(
+        self,
+        listing: RawListing,
+        search_name: str,
+        fp: str,
+        watchlist_name: str | None = None,
+        model_name: str | None = None,
+    ) -> None:
         now = utcnow()
         self._conn.execute(
             """
-            INSERT INTO listings (listing_id, search_name, title, price_cents, location,
+            INSERT INTO listings (listing_id, search_name, watchlist_name, model_name,
+                                  title, price_cents, location,
                                   url, thumbnail_url, seller_name, fingerprint,
                                   first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(listing_id) DO UPDATE SET
                 title = excluded.title,
                 price_cents = excluded.price_cents,
@@ -237,12 +290,31 @@ class Store:
                 last_seen_at = excluded.last_seen_at
             """,
             (
-                listing.listing_id, search_name, listing.title, listing.price_cents,
+                listing.listing_id, search_name, watchlist_name, model_name,
+                listing.title, listing.price_cents,
                 listing.location, listing.url, listing.thumbnail_url,
                 listing.seller_name, fp, now, now,
             ),
         )
         self._conn.commit()
+
+    def reassign(
+        self, listing_id: str, watchlist_name: str, model_name: str
+    ) -> None:
+        """Move a listing to the watchlist and model that now accept it."""
+        self._conn.execute(
+            "UPDATE listings SET watchlist_name = ?, model_name = ? WHERE listing_id = ?",
+            (watchlist_name, model_name, listing_id),
+        )
+        self._conn.commit()
+
+    def prefiltered_listings(self) -> list[ListingRow]:
+        """Every listing rejected before extraction — the requeue corpus."""
+        cur = self._conn.execute(
+            "SELECT * FROM listings WHERE stage = 'prefiltered_out'"
+            " ORDER BY first_seen_at"
+        )
+        return [_row_to_listing(row) for row in cur.fetchall()]
 
     def set_stage(self, listing_id: str, stage: str, reject_reason: str | None = None) -> None:
         self._conn.execute(
