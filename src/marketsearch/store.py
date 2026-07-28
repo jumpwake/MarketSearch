@@ -577,7 +577,7 @@ class Store:
         return out
 
     def listings_with_details(
-        self, search_name: str | None, since: str
+        self, model_name: str | None, since: str
     ) -> list[tuple[ListingRow, ListingDetail, ExtractionRow | None]]:
         """Stored listings that have a saved detail — the replay corpus."""
         sql = (
@@ -586,9 +586,9 @@ class Store:
             " WHERE l.first_seen_at >= ?"
         )
         params: list[object] = [since]
-        if search_name is not None:
-            sql += " AND l.search_name = ?"
-            params.append(search_name)
+        if model_name is not None:
+            sql += " AND l.model_name = ?"
+            params.append(model_name)
         sql += " ORDER BY l.first_seen_at DESC"
 
         out = []

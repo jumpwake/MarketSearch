@@ -267,7 +267,7 @@ def preview(
 
 @app.command()
 def replay(
-    search: str = typer.Option(..., "--search", help="Search name from config.yaml."),
+    search: str = typer.Option(..., "--search", help="Model name from config.yaml."),
     since: str = typer.Option("30d", "--since", help="e.g. 7d, 36h."),
     config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
     db: Path = typer.Option(DEFAULT_DB, "--db"),
@@ -285,7 +285,7 @@ def replay(
     with Store(db) as store:
         store.initialize()
         rows = run_replay(
-            store, cfg, build_extractor(cfg), search_name=search,
+            store, cfg, build_extractor(cfg), model_name=search,
             since=since, save=save,
         )
 

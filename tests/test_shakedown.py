@@ -9,6 +9,7 @@ from marketsearch.models import ListingDetail
 from marketsearch.pipeline import content_hash
 from marketsearch.shakedown import (
     ReplayRow,
+    _watchlist_by_name,
     collect_run_cards,
     format_replay,
     parse_since,
@@ -16,7 +17,13 @@ from marketsearch.shakedown import (
 )
 from marketsearch.store import Store
 
-from tests.test_pipeline_scan import FakeExtractor, config, extraction, listing
+from tests.test_pipeline_scan import (
+    FakeExtractor,
+    config,
+    extraction,
+    listing,
+    watchlist_config,
+)
 
 
 @pytest.fixture
@@ -28,7 +35,8 @@ def store(tmp_path: Path) -> Store:
 
 
 def seed_extracted(store: Store, listing_id: str, verdict: str = "match") -> None:
-    store.upsert_listing(listing(listing_id), "bobcat-t770", f"fp{listing_id}")
+    store.upsert_listing(listing(listing_id), "bobcat-t770", f"fp{listing_id}",
+                         watchlist_name="track-loaders", model_name="bobcat-t770")
     detail = ListingDetail(listing_id=listing_id, description="2400 hours",
                            structured_fields={}, photo_urls=[], distance_miles=None)
     store.save_detail(detail, content_hash(detail))
@@ -38,6 +46,23 @@ def seed_extracted(store: Store, listing_id: str, verdict: str = "match") -> Non
         model="claude-opus-5", input_tokens=1, output_tokens=1, cost_cents=0.1,
     )
     store.set_stage(listing_id, "matched" if verdict == "match" else "extracted")
+
+
+def test_watchlist_resolves_from_a_model_name():
+    """A row labelled with a model must find its watchlist's criteria."""
+    watchlist = _watchlist_by_name(watchlist_config(), "bobcat-t770")
+    assert watchlist is not None
+    assert watchlist.name == "track-loaders"
+    assert watchlist.criteria == "Under 3000 engine hours."
+
+
+def test_unknown_model_resolves_to_no_watchlist():
+    assert _watchlist_by_name(watchlist_config(), "newholland-c") is None
+
+
+def test_grapple_model_resolves_to_the_attachments_watchlist():
+    watchlist = _watchlist_by_name(watchlist_config(), "root-grapple")
+    assert watchlist.name == "attachments"
 
 
 def test_parse_since_days():
@@ -78,9 +103,11 @@ def test_collect_run_cards_splits_matches_and_unverified(store: Store):
 
 
 def test_collect_run_cards_respects_on_unknown_skip(store: Store):
-    from tests.test_pipeline_scan import CONFIG_DICT
+    from tests.test_pipeline_scan import WATCHLIST_DICT
 
-    cfg = config(searches=[{**CONFIG_DICT["searches"][0], "on_unknown": "skip"}])
+    cfg = watchlist_config(
+        watchlists=[{**WATCHLIST_DICT["watchlists"][0], "on_unknown": "skip"}]
+    )
     run_id = store.start_run()
     seed_extracted(store, "2", "unverifiable")
     store.finish_run(run_id, {})
@@ -104,7 +131,7 @@ def test_collect_run_cards_ignores_other_runs(store: Store):
 def test_replay_reextracts_stored_listings(store: Store):
     seed_extracted(store, "1", "unverifiable")
     extractor = FakeExtractor(extraction("match"))
-    rows = replay(store, config(), extractor, search_name="bobcat-t770", since="30d")
+    rows = replay(store, watchlist_config(), extractor, model_name="bobcat-t770", since="30d")
     assert len(rows) == 1
     assert rows[0].old_verdict == "unverifiable"
     assert rows[0].new_verdict == "match"
@@ -114,34 +141,36 @@ def test_replay_never_touches_the_network_or_facebook(store: Store):
     """The whole point: tuning carries zero detection risk."""
     seed_extracted(store, "1")
     extractor = FakeExtractor()
-    replay(store, config(), extractor, search_name="bobcat-t770", since="30d")
+    replay(store, watchlist_config(), extractor, model_name="bobcat-t770", since="30d")
     assert extractor.calls == 1  # one Claude call, no source involved
 
 
 def test_replay_does_not_write_by_default(store: Store):
     seed_extracted(store, "1", "unverifiable")
-    replay(store, config(), FakeExtractor(extraction("match")),
-           search_name="bobcat-t770", since="30d")
+    replay(store, watchlist_config(), FakeExtractor(extraction("match")),
+           model_name="bobcat-t770", since="30d")
     assert store.latest_extraction("1").verdict == "unverifiable"
 
 
 def test_replay_writes_when_save_is_requested(store: Store):
     seed_extracted(store, "1", "unverifiable")
-    replay(store, config(), FakeExtractor(extraction("match")),
-           search_name="bobcat-t770", since="30d", save=True)
+    replay(store, watchlist_config(), FakeExtractor(extraction("match")),
+           model_name="bobcat-t770", since="30d", save=True)
     assert store.latest_extraction("1").verdict == "match"
 
 
-def test_replay_filters_by_search_name(store: Store):
+def test_replay_filters_by_model_name(store: Store):
     seed_extracted(store, "1")
     store.upsert_listing(listing("2"), "some-other-search", "fp2")
-    rows = replay(store, config(), FakeExtractor(), search_name="bobcat-t770", since="30d")
+    rows = replay(store, watchlist_config(), FakeExtractor(), model_name="bobcat-t770",
+                  since="30d")
     assert [r.listing_id for r in rows] == ["1"]
 
 
 def test_replay_skips_listings_with_no_stored_detail(store: Store):
     store.upsert_listing(listing("3"), "bobcat-t770", "fp3")  # no detail saved
-    rows = replay(store, config(), FakeExtractor(), search_name="bobcat-t770", since="30d")
+    rows = replay(store, watchlist_config(), FakeExtractor(), model_name="bobcat-t770",
+                  since="30d")
     assert rows == []
 
 

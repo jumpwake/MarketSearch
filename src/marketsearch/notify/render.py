@@ -237,7 +237,7 @@ def render_sms(
 ) -> str:
     parts: list[str] = []
     if matches:
-        names = sorted({c.listing.search_name for c in matches})
+        names = sorted({c.listing.model_name for c in matches if c.listing.model_name})
         parts.append(f"{len(matches)} new match{'' if len(matches) == 1 else 'es'} "
                      f"({', '.join(names)})")
     if unverified:

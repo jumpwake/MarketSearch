@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from marketsearch.config import Config, SearchConfig
+from marketsearch.config import Config, WatchlistConfig
 from marketsearch.extract import ExtractionError, Extractor
 from marketsearch.models import RawListing
 from marketsearch.notify.render import MatchCard
@@ -36,10 +36,14 @@ def parse_since(value: str) -> datetime:
     return datetime.now(timezone.utc) - timedelta(**{_UNITS[unit]: amount})
 
 
-def _search_by_name(config: Config, name: str) -> SearchConfig | None:
-    for search in config.searches:
-        if search.name == name:
-            return search
+def _watchlist_by_name(config: Config, model_name: str | None) -> WatchlistConfig | None:
+    """The watchlist that owns a model, which is where its criteria live."""
+    if model_name is None:
+        return None
+    for watchlist in config.watchlists:
+        for model in watchlist.models:
+            if model.name == model_name:
+                return watchlist
     return None
 
 
@@ -60,8 +64,8 @@ def collect_run_cards(
         if extraction.verdict == "match":
             matches.append(card)
         elif extraction.verdict == "unverifiable":
-            search = _search_by_name(config, listing.search_name)
-            if search is None or search.on_unknown == "alert":
+            watchlist = _watchlist_by_name(config, listing.model_name)
+            if watchlist is None or watchlist.on_unknown == "alert":
                 unverified.append(card)
 
     return matches, unverified
@@ -89,26 +93,26 @@ def replay(
     store: Store,
     config: Config,
     extractor: Extractor,
-    search_name: str | None,
+    model_name: str | None,
     since: str,
     save: bool = False,
 ) -> list[ReplayRow]:
     """Re-judge stored listings with the criteria currently in config.yaml."""
     cutoff = parse_since(since).isoformat()
-    corpus = store.listings_with_details(search_name, cutoff)
+    corpus = store.listings_with_details(model_name, cutoff)
     rows: list[ReplayRow] = []
 
     for listing, detail, previous in corpus:
-        search = _search_by_name(config, listing.search_name)
-        if search is None:
+        watchlist = _watchlist_by_name(config, listing.model_name)
+        if watchlist is None:
             log.warning(
-                "listing %s belongs to search %r which is no longer in config; skipping",
-                listing.listing_id, listing.search_name,
+                "listing %s is labelled model %r which is no longer in config; skipping",
+                listing.listing_id, listing.model_name,
             )
             continue
 
         try:
-            result = extractor.extract(_as_raw(listing), detail, search.criteria)
+            result = extractor.extract(_as_raw(listing), detail, watchlist.criteria)
         except ExtractionError as exc:
             log.warning("replay failed for %s: %s", listing.listing_id, exc)
             continue

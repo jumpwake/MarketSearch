@@ -16,7 +16,8 @@ from marketsearch.notify.render import (
 from marketsearch.store import ExtractionRow, ListingRow
 
 
-def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000) -> ListingRow:
+def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000,
+            model_name="bobcat-t770") -> ListingRow:
     return ListingRow(
         listing_id=listing_id, search_name="bobcat-t770", title=title,
         price_cents=price_cents, location="Olathe, KS",
@@ -26,6 +27,7 @@ def listing(listing_id="1", title="2019 Bobcat T770", price_cents=3_800_000) -> 
         first_seen_at="2026-07-26T10:00:00+00:00",
         last_seen_at="2026-07-26T10:00:00+00:00", last_change_check_at=None,
         extraction_attempts=0,
+        watchlist_name="track-loaders", model_name=model_name,
     )
 
 
@@ -152,6 +154,18 @@ def test_sms_is_short_and_mentions_counts():
     assert len(text) <= 160
     assert "2" in text
     assert "check email" in text.lower()
+
+
+def test_sms_names_models_not_searches():
+    cards = [
+        MatchCard(listing=listing("1", model_name="bobcat-t770"),
+                  extraction=extraction(), photos=[]),
+        MatchCard(listing=listing("2", model_name="root-grapple"),
+                  extraction=extraction(), photos=[]),
+    ]
+    body = render_sms(cards, [], [])
+    assert "bobcat-t770" in body
+    assert "root-grapple" in body
 
 
 def test_sms_mentions_changes_when_there_are_no_matches():
