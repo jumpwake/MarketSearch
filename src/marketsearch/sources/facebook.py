@@ -60,12 +60,28 @@ _GRAPHQL_PATH = "/api/graphql/"
 _LISTING_MARKER = '"marketplace_listing_title"'
 
 
-def build_search_url(query: str, radius_miles: int) -> str:
-    params = {
-        "query": query,
-        "radiusKM": int(round(radius_miles * 1.60934)),
-        "sortBy": "creation_time_descend",
-    }
+def build_search_url(
+    query: str, radius_miles: int, newest_first: bool = False
+) -> str:
+    """Marketplace search URL. Relevance-ranked unless asked otherwise.
+
+    Omitting `sortBy` leaves Facebook's own ranking in place, which is what a
+    person gets searching by hand. Adding `sortBy=creation_time_descend` does
+    not merely reorder those results — it takes Facebook's much looser match
+    set and sorts the whole thing by date, so once the genuine matches run out
+    the slots fill with whatever was posted nearby most recently.
+
+    Measured on a live account, "Bobcat T770" at 100 miles:
+
+        date-sorted   120 listings,   4 mentioning Bobcat,  0 catalog matches
+        relevance     101 listings,  24 mentioning Bobcat,  6 catalog matches
+
+    The date sort degrades as the radius tightens, because a smaller radius
+    holds fewer real matches to occupy the early slots.
+    """
+    params = {"query": query, "radiusKM": int(round(radius_miles * 1.60934))}
+    if newest_first:
+        params["sortBy"] = "creation_time_descend"
     return f"{SEARCH_BASE}?{urlencode(params)}"
 
 
@@ -127,11 +143,13 @@ class FacebookSource:
         debug_dir: Path | None = None,
         fetch_html: Callable[[str], str] | None = None,
         max_listings_per_search: int = _DEFAULT_TARGET_LISTINGS,
+        newest_first: bool = False,
     ) -> None:
         self.profile_dir = Path(profile_dir)
         self.headless = headless
         self.debug_dir = Path(debug_dir) if debug_dir else None
         self.max_listings_per_search = max_listings_per_search
+        self.newest_first = newest_first
         self._fetch_html_override = fetch_html
         self._playwright = None
         self._context = None
@@ -243,8 +261,12 @@ class FacebookSource:
     # ---- ListingSource ---------------------------------------------------
 
     def search(self, query: str, location: str, radius_miles: int) -> list[RawListing]:
-        url = build_search_url(query, radius_miles)
-        log.info("searching %r (location %s, %d mi)", query, location, radius_miles)
+        url = build_search_url(query, radius_miles, self.newest_first)
+        log.info(
+            "searching %r (location %s, %d mi, %s)",
+            query, location, radius_miles,
+            "newest first" if self.newest_first else "by relevance",
+        )
         # Results are per-search; last query's traffic must not bleed into this one.
         self._scrolled.clear()
         html = self._load(url, "search")

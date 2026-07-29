@@ -32,8 +32,21 @@ def test_build_search_url_encodes_the_query():
     assert url.startswith("https://www.facebook.com/marketplace/search")
 
 
-def test_build_search_url_sorts_newest_first():
-    assert "sortBy=creation_time_descend" in build_search_url("x", radius_miles=100)
+def test_build_search_url_defaults_to_relevance():
+    """No sortBy means Facebook's own ranking.
+
+    Measured on a live account at a 100-mile radius: the date sort returned
+    120 listings of which 0 matched any watched model, while the same query
+    without it returned 101 of which 6 did. Forcing a date order takes
+    Facebook's loose match set and floats recent junk to the top.
+    """
+    url = build_search_url("x", radius_miles=100)
+    assert "sortBy" not in url
+
+
+def test_build_search_url_can_still_sort_newest_first():
+    url = build_search_url("x", radius_miles=100, newest_first=True)
+    assert "sortBy=creation_time_descend" in url
 
 
 def test_build_search_url_converts_miles_to_kilometres():

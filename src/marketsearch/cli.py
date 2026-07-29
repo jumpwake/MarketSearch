@@ -108,6 +108,11 @@ def run(
     lock: Path = typer.Option(DEFAULT_LOCK, "--lock"),
     log_file: Path = typer.Option(DEFAULT_LOG, "--log"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Scan but write and send nothing."),
+    newest_first: bool = typer.Option(
+        False, "--newest-first",
+        help="Sort by listing date instead of relevance. Catches brand-new "
+             "listings, but returns far more noise at a tight radius.",
+    ),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
     """Perform one sweep."""
@@ -122,6 +127,7 @@ def run(
                 with FacebookSource(
                     cfg.account.profile_dir, headless=True, debug_dir=DEFAULT_DEBUG,
                     max_listings_per_search=cfg.extraction.max_listings_per_search,
+                    newest_first=newest_first,
                 ) as source:
                     report = run_once(
                         config=cfg,
