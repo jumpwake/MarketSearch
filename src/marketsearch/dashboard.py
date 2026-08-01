@@ -66,12 +66,18 @@ def top_picks(
 
     Retired models are excluded: presenting a disabled search's matches as
     things to go buy would be wrong. They stay visible in the browse list.
+
+    Discarded listings are excluded for the stronger reason: the user has
+    already looked at that machine and rejected it, which outranks any value
+    ranking this function could compute.
     """
     picks: list[Pick] = []
     for row in rows:
         if row.extraction.verdict != "match":
             continue
         if row.listing.model_name not in live_models:
+            continue
+        if row.listing.dismissed:
             continue
         hours = engine_hours(row.extraction)
         picks.append(
@@ -179,6 +185,13 @@ def _card(row: JudgedListing, life_hours: int) -> str:
 
     value_text = _value_label(listing.price_cents, hours, life_hours)
 
+    # `data-dismissed` carries only what the database says. The page layers the
+    # user's un-saved clicks on top of it client-side, so the two states stay
+    # distinguishable — that difference is what the "make permanent" tray needs.
+    discard_note = ""
+    if listing.dismissed:
+        discard_note = f'<span class="chip chip--discarded">discarded{_esc(": " + listing.dismiss_reason if listing.dismiss_reason else "")}</span>'
+
     return f"""
 <article class="card" data-listing-id="{_esc(listing.listing_id)}"
          data-verdict="{_esc(extraction.verdict)}"
@@ -186,13 +199,16 @@ def _card(row: JudgedListing, life_hours: int) -> str:
          data-price-cents="{'' if listing.price_cents is None else listing.price_cents}"
          data-hours="{'' if hours is None else hours}"
          data-confidence="{extraction.confidence}"
+         data-dismissed="{'1' if listing.dismissed else ''}"
          data-seen="{_esc(listing.first_seen_at)}">
   {_photo(row)}
   <div class="body">
     <h3><a href="{_esc(listing.url)}" target="_blank" rel="noopener">{_esc(listing.title)}</a></h3>
     <p class="meta">
+      <span class="badge badge--new" hidden>NEW</span>
       <span class="price">{_esc(dollars(listing.price_cents))}</span>
       <span class="badge badge--{_esc(extraction.verdict)}">{_esc(extraction.verdict)}</span>
+      {discard_note}
       <span class="chip">{_esc(listing.model_name)}</span>
       <span class="chip">{_esc(listing.location)}</span>
       <span class="chip value-chip">{_esc(value_text)}</span>
@@ -202,6 +218,7 @@ def _card(row: JudgedListing, life_hours: int) -> str:
     <dl class="attrs">{rows_html}</dl>
     <blockquote>{_esc(extraction.reasoning)}</blockquote>
   </div>
+  <button class="discard" type="button" title="Discard this listing">&#10005;</button>
 </article>"""
 
 
@@ -222,9 +239,12 @@ def render_dashboard(
         picks_html = "".join(
             f'<li data-pick="{_esc(p.row.listing.listing_id)}"'
             f' data-hours="{"" if p.hours is None else p.hours}"'
+            f' data-seen="{_esc(p.row.listing.first_seen_at)}"'
             f' data-price-cents="{"" if p.row.listing.price_cents is None else p.row.listing.price_cents}">'
+            f'<span class="pick-title">'
             f'<a href="{_esc(p.row.listing.url)}" target="_blank" rel="noopener">'
             f"{_esc(p.row.listing.title)}</a>"
+            f'<span class="badge badge--new" hidden>NEW</span></span>'
             f'<span class="pick-value">'
             f"{_esc(_value_label(p.row.listing.price_cents, p.hours, life_hours))}"
             f"</span>"
@@ -256,6 +276,12 @@ def render_dashboard(
         '<p class="empty">Nothing judged yet — run a sweep first.</p>'
     )
 
+    n_discarded = sum(1 for r in rows if r.listing.dismissed)
+    discarded_note = (
+        f'<span class="sub">{n_discarded} discarded and hidden</span>'
+        if n_discarded else ""
+    )
+
     life_min, life_max = _slider_bounds(life_hours)
 
     return f"""<!doctype html>
@@ -263,16 +289,16 @@ def render_dashboard(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MarketSearch results</title>
 <style>{_CSS}</style></head>
-<body>
+<body data-generated="{_esc(generated_at)}">
 <header>
   <h1>MarketSearch results</h1>
-  <p class="sub">{len(rows)} judged · generated {_esc(generated_at)}</p>
+  <p class="sub">{len(rows)} judged · generated {_esc(generated_at)}<span id="newCount"></span></p>
 </header>
 
 <section class="criteria"><h2>Criteria</h2>{criteria_html}</section>
 
 <section class="top">
-  <h2>Top picks <span class="sub">{_esc(picks_head)}</span></h2>
+  <h2>Top picks <span class="sub" id="picksHead">{_esc(picks_head)}</span></h2>
   <label class="life">Assumed usable life
     <input id="life" type="range" min="{life_min}" max="{life_max}" step="500" value="{life_hours}">
     <output id="lifeOut">{life_hours:,}</output> hrs
@@ -283,7 +309,7 @@ def render_dashboard(
 </section>
 
 <section class="browse">
-  <h2>All judged listings</h2>
+  <h2>All judged listings{discarded_note}</h2>
   <div class="controls">
     <input id="q" type="search" placeholder="search title, location, reasoning">
     <select id="model"><option value="">all models</option>{model_options}</select>
@@ -299,6 +325,16 @@ def render_dashboard(
       <option value="hours">hours</option>
       <option value="seen">newest</option>
     </select>
+    <button id="showDiscarded" class="toggle" type="button">show discarded</button>
+  </div>
+  <div id="tray" class="tray" hidden>
+    <p class="tray-head"><span id="trayText"></span> — this browser remembers it,
+       but the database does not yet. Run this to make it permanent:</p>
+    <textarea id="trayCmd" class="tray-cmd" readonly rows="2"></textarea>
+    <span class="tray-buttons">
+      <button id="trayCopy" type="button">copy</button>
+      <button id="trayClear" type="button">clear</button>
+    </span>
   </div>
   <div id="cards">{cards}</div>
 </section>
@@ -317,6 +353,69 @@ const q = document.getElementById('q');
 const model = document.getElementById('model');
 const sort = document.getElementById('sort');
 const off = new Set();
+let showDiscarded = false;
+
+// ---- browser-side memory -----------------------------------------------
+// Two things the page remembers between visits: which listings you have
+// discarded but not yet written to the database, and when you last looked.
+// Both are best-effort. localStorage is absent under the Node test harness
+// and throws outright in a browser with site data blocked; either way the
+// page must still work, just without memory.
+const DISCARD_KEY = 'ms.discards';
+const VIEWED_KEY = 'ms.lastViewed';
+
+function readStored(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+
+function writeStored(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* no memory, no harm */ }
+}
+
+// What the database already knows, straight off the server-rendered markup.
+const dbDiscarded = new Set();
+for (const card of cards) {
+  if (card.dataset.dismissed === '1') dbDiscarded.add(card.dataset.listingId);
+}
+
+// Clicks not yet written to the database, in both directions.
+const toDiscard = new Set();
+const toRestore = new Set();
+
+// Reconcile against the database on every load: an id we were holding as
+// "to discard" that now comes back marked discarded means the CLI command
+// was run, so the reminder retires itself rather than nagging forever.
+(function loadDiscards() {
+  let saved = {};
+  try { saved = JSON.parse(readStored(DISCARD_KEY) || '{}') || {}; } catch (e) { saved = {}; }
+  for (const id of saved.discard || []) if (!dbDiscarded.has(id)) toDiscard.add(id);
+  for (const id of saved.restore || []) if (dbDiscarded.has(id)) toRestore.add(id);
+  saveDiscards();
+})();
+
+function saveDiscards() {
+  writeStored(DISCARD_KEY,
+              JSON.stringify({discard: [...toDiscard], restore: [...toRestore]}));
+}
+
+function isDiscarded(id) {
+  if (toRestore.has(id)) return false;
+  return dbDiscarded.has(id) || toDiscard.has(id);
+}
+
+function toggleDiscard(card) {
+  const id = card.dataset.listingId;
+  if (!id) return;
+  if (isDiscarded(id)) {
+    // Undoing an unsaved discard just drops it; undoing a saved one needs a
+    // command of its own, so it moves to the restore list instead.
+    if (toDiscard.has(id)) toDiscard.delete(id); else toRestore.add(id);
+  } else {
+    if (toRestore.has(id)) toRestore.delete(id); else toDiscard.add(id);
+  }
+  saveDiscards();
+  apply();
+}
 
 // Pure, DOM-free mirrors of value_per_remaining_hour / top_picks in
 // dashboard.py. Kept free of document/card so both the browse cards and the
@@ -363,13 +462,27 @@ function factsOf(el) {
 // slider moved, contradicting the browse list it sits next to.
 function applyPicks(lifeHours) {
   for (const li of picks) {
+    // top_picks() already dropped everything the database has discarded; this
+    // catches the ones discarded in this browser since the page was built.
+    li.hidden = isDiscarded(li.dataset.pick);
     const valueEl = li.querySelector('.pick-value');
     if (valueEl) {
       const {hours, priceCents} = factsOf(li);
       valueEl.textContent = valueLabel(hours, priceCents, lifeHours);
     }
   }
+  // Discarding a pick in the browser has to move the count with it, or the
+  // heading goes on advertising matches that are no longer on screen.
+  const remaining = picks.filter(li => !li.hidden).length;
+  const head = document.getElementById('picksHead');
+  if (head) {
+    // Mirrors picks_head in render_dashboard — keep the two in step.
+    head.textContent = remaining === 0
+      ? 'no matches from models in your config'
+      : remaining + (remaining === 1 ? ' match' : ' matches') + ' from models in your config';
+  }
   if (!picksHost) return;
+  picksHost.hidden = remaining === 0;
   const ranked = [...picks].sort((a, b) => compareByValue(factsOf(a), factsOf(b), lifeHours));
   for (const li of ranked) picksHost.appendChild(li);
 }
@@ -384,7 +497,16 @@ function apply() {
     const hit = !needle || card.textContent.toLowerCase().includes(needle);
     const modelOk = !wanted || card.dataset.model === wanted;
     const verdictOk = !off.has(card.dataset.verdict);
-    card.hidden = !(hit && modelOk && verdictOk);
+    const discarded = isDiscarded(card.dataset.listingId);
+    // An attribute rather than a class: the shim's classList has no remove(),
+    // and this has to be able to go back off when a discard is undone.
+    card.dataset.discarded = discarded ? '1' : '';
+    card.hidden = !(hit && modelOk && verdictOk && (showDiscarded || !discarded));
+    const btn = card.querySelector('.discard');
+    if (btn) {
+      btn.textContent = discarded ? '\\u21A9' : '\\u2715';
+      btn.title = discarded ? 'Restore this listing' : 'Discard this listing';
+    }
     const chip = card.querySelector('.value-chip');
     if (chip) {
       const {hours, priceCents} = factsOf(card);
@@ -413,6 +535,59 @@ function apply() {
   for (const card of shown) host.appendChild(card);
 
   applyPicks(lifeHours);
+  updateTray();
+}
+
+// ---- the "make it permanent" tray --------------------------------------
+// The page is a file:// document with no server behind it, so a click here
+// cannot write to marketsearch.db. It hides the listing immediately and hands
+// back the exact command that makes the same decision stick in the database,
+// where the pipeline and the notifier can both honour it.
+const tray = document.getElementById('tray');
+const trayText = document.getElementById('trayText');
+const trayCmd = document.getElementById('trayCmd');
+
+function updateTray() {
+  if (!tray) return;
+  const lines = [];
+  if (toDiscard.size) lines.push('marketsearch dismiss ' + [...toDiscard].join(' '));
+  if (toRestore.size) lines.push('marketsearch dismiss --undo ' + [...toRestore].join(' '));
+  tray.hidden = lines.length === 0;
+  if (!lines.length) return;
+  const parts = [];
+  if (toDiscard.size) parts.push(toDiscard.size + ' discarded');
+  if (toRestore.size) parts.push(toRestore.size + ' restored');
+  if (trayText) trayText.textContent = parts.join(', ');
+  if (trayCmd) trayCmd.value = lines.join('\\n');
+}
+
+// ---- new since you last looked ------------------------------------------
+function markNew() {
+  const generated = (document.body && document.body.dataset.generated) || '';
+  const last = readStored(VIEWED_KEY);
+  let count = 0;
+  // first_seen_at and the generated stamp are both UTC ISO-8601 carrying the
+  // same +00:00 offset, so comparing them as strings compares them in time.
+  if (last) {
+    for (const card of cards) {
+      if (card.dataset.seen > last) { showNewBadge(card); count++; }
+    }
+    for (const li of picks) {
+      if (li.dataset.seen > last) showNewBadge(li);
+    }
+  }
+  const out = document.getElementById('newCount');
+  if (out) out.textContent = count ? ' \\u00b7 ' + count + ' new since you last looked' : '';
+  // Stamped with the page's own generated time, not the clock: a listing found
+  // after this page was built is genuinely still unseen and has to stay NEW on
+  // the next build. On a first visit there is no watermark and nothing is
+  // badged — everything being NEW is the same as nothing being NEW.
+  if (generated) writeStored(VIEWED_KEY, generated);
+}
+
+function showNewBadge(el) {
+  const badge = el.querySelector('.badge--new');
+  if (badge) badge.hidden = false;
 }
 
 for (const el of [q, model, sort, life]) el.addEventListener('input', apply);
@@ -423,6 +598,52 @@ for (const b of document.querySelectorAll('.v')) {
     apply();
   });
 }
+
+for (const card of cards) {
+  const btn = card.querySelector('.discard');
+  if (btn) btn.addEventListener('click', () => toggleDiscard(card));
+}
+
+const showDiscardedBtn = document.getElementById('showDiscarded');
+if (showDiscardedBtn) {
+  showDiscardedBtn.addEventListener('click', () => {
+    showDiscarded = !showDiscarded;
+    showDiscardedBtn.classList.toggle('on');
+    apply();
+  });
+}
+
+const trayCopy = document.getElementById('trayCopy');
+if (trayCopy) {
+  trayCopy.addEventListener('click', () => {
+    if (!trayCmd) return;
+    // navigator.clipboard needs a secure context, which a file:// page is not
+    // guaranteed to be. Selecting the textarea first means that even if every
+    // copy path fails, the command is sitting there highlighted for a manual
+    // Ctrl+C rather than lost.
+    trayCmd.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+    if (copied) { trayCopy.textContent = 'copied'; return; }
+    try {
+      navigator.clipboard.writeText(trayCmd.value).then(
+        () => { trayCopy.textContent = 'copied'; },
+        () => { trayCopy.textContent = 'press Ctrl+C'; });
+    } catch (e) { trayCopy.textContent = 'press Ctrl+C'; }
+  });
+}
+
+const trayClear = document.getElementById('trayClear');
+if (trayClear) {
+  trayClear.addEventListener('click', () => {
+    toDiscard.clear();
+    toRestore.clear();
+    saveDiscards();
+    apply();
+  });
+}
+
+markNew();
 apply();
 """
 
@@ -474,7 +695,12 @@ section { margin:28px 0 }
   display:grid; grid-template-columns:1.4em 1fr auto auto auto; gap:14px;
   align-items:baseline; border-top:1px solid var(--line);
 }
+/* `display:grid` above beats the user-agent [hidden] rule, exactly as it does
+   for .card — without this a pick discarded in the browser stays on screen. */
+.picks li[hidden] { display:none }
 .picks li:first-child { border-top:none }
+.pick-title { display:flex; gap:8px; align-items:baseline; min-width:0 }
+.pick-title a { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .picks li:hover { background:color-mix(in srgb, var(--accent) 6%, transparent) }
 .picks li::before {
   content:counter(pick); color:var(--muted); font-size:12px;
@@ -502,19 +728,54 @@ section { margin:28px 0 }
   .pick-spec, .pick-facts { grid-column:2 / -1; text-align:left }
 }
 .controls { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px }
-.controls input, .controls select, .v {
+.controls input, .controls select, .v, .toggle {
   padding:6px 10px; border:1px solid var(--line); border-radius:8px;
   background:var(--card); color:var(--fg); font:inherit; font-size:13px;
 }
 .controls input[type=search] { flex:1 1 220px }
-.v { cursor:pointer; opacity:.4 }
-.v.on { opacity:1; border-color:var(--accent) }
+.v, .toggle { cursor:pointer; opacity:.4 }
+.v.on, .toggle.on { opacity:1; border-color:var(--accent) }
+/* The bridge between a click here and the database. Deliberately loud: an
+   unsaved discard is a decision the rest of the system cannot see yet. */
+.tray {
+  display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center;
+  margin-bottom:14px; padding:10px 12px; border-radius:10px;
+  border:1px solid var(--accent); background:var(--card);
+}
+.tray[hidden] { display:none }
+.tray-head { margin:0; flex:1 1 100%; font-size:13px; color:var(--muted) }
+.tray-head #trayText { color:var(--fg); font-weight:600 }
+.tray-cmd {
+  flex:1 1 320px; resize:vertical; padding:6px 8px; border-radius:8px;
+  border:1px solid var(--line); background:var(--bg); color:var(--fg);
+  font:12px/1.5 ui-monospace, Consolas, monospace; white-space:pre;
+}
+.tray-buttons { display:flex; gap:8px }
+.tray button {
+  padding:6px 12px; border-radius:8px; border:1px solid var(--line);
+  background:var(--card); color:var(--fg); font:inherit; font-size:13px;
+  cursor:pointer;
+}
+.tray button:hover { border-color:var(--accent) }
 #cards { display:grid; gap:14px }
 .card {
   display:flex; gap:14px; background:var(--card); border:1px solid var(--line);
-  border-radius:12px; padding:14px;
+  border-radius:12px; padding:14px; position:relative;
 }
 .card[hidden] { display:none }
+/* Only visible at all while "show discarded" is on, so it has to read as
+   struck-off at a glance rather than merely a little dimmer. */
+.card[data-discarded="1"] { opacity:.5; border-style:dashed }
+.discard {
+  position:absolute; top:8px; right:8px; width:26px; height:26px; padding:0;
+  border:1px solid transparent; border-radius:8px; background:transparent;
+  color:var(--muted); font:inherit; font-size:13px; line-height:1;
+  cursor:pointer; opacity:0; transition:opacity .12s;
+}
+.card:hover .discard, .discard:focus { opacity:1 }
+.discard:hover { border-color:var(--line); color:var(--fg); background:var(--bg) }
+/* Keyboard and touch users get no hover, so never hide it from them outright. */
+@media (hover:none) { .discard { opacity:.6 } }
 .photo {
   width:150px; height:112px; object-fit:cover; border-radius:8px; flex:none;
   background:var(--bg);
@@ -540,6 +801,9 @@ section { margin:28px 0 }
 }
 .badge--match { background:var(--match) }
 .badge--unverifiable { background:var(--unver) }
+.badge--new { background:var(--accent) }
+.badge[hidden] { display:none }
+.chip--discarded { border-color:var(--nomatch); color:var(--nomatch) }
 .unknowns { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px }
 .unknowns > span:first-child { font-size:12px; color:var(--unver); font-weight:600 }
 .chip--unknown { border-color:var(--unver); color:var(--unver) }

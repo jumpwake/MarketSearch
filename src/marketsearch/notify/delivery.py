@@ -142,6 +142,24 @@ class Dispatcher:
         changes: list[ChangeCard],
     ) -> bool:
         """Send at most one email and one SMS. Returns True if anything went out."""
+        # Nothing to send means nothing to look up. Kept ahead of every store
+        # call so a caller with an empty run never touches the database at all.
+        if not (matches or unverified or changes):
+            return False
+
+        # A discarded listing is silenced for good, including for changes. A
+        # price drop on a machine already judged a scam is not news, and
+        # re-alerting on it is exactly what discarding is meant to stop.
+        discarded = self._store.dismissed_listing_ids()
+        if discarded:
+            before = len(matches) + len(unverified) + len(changes)
+            matches = [c for c in matches if c.listing.listing_id not in discarded]
+            unverified = [c for c in unverified if c.listing.listing_id not in discarded]
+            changes = [c for c in changes if c.listing.listing_id not in discarded]
+            suppressed = before - (len(matches) + len(unverified) + len(changes))
+            if suppressed:
+                log.info("suppressed %d alert(s) for discarded listing(s)", suppressed)
+
         matches = [c for c in matches
                    if not self._store.already_notified(c.listing.listing_id, "email", "match")]
         unverified = [c for c in unverified

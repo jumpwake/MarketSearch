@@ -39,6 +39,10 @@ class FakeElement {
     };
   }
   addEventListener(evt, fn) { (this._listeners[evt] = this._listeners[evt] || []).push(fn); }
+  // Invoke the handlers `_JS` registered, the way a real click would. Used by
+  // assert_discard.js to exercise the discard button rather than reaching past
+  // it into the functions behind it.
+  fire(evt) { for (const fn of this._listeners[evt] || []) fn(); }
   appendChild(child) {
     const i = this.children.indexOf(child);
     if (i !== -1) this.children.splice(i, 1);
@@ -69,24 +73,51 @@ function el(tag, attrs, children = []) {
   return e;
 }
 
-function machine(id, priceCents, hours) {
+const SEEN_AT = '2026-07-27T10:00:00+00:00';
+
+function newBadge() {
+  const badge = el('span', {className: 'badge badge--new'});
+  badge.hidden = true;
+  return badge;
+}
+
+function machine(id, priceCents, hours, seenAt = SEEN_AT) {
   const valueEl = el('span', {className: 'pick-value'});
   const li = el('li', {
-    dataset: {pick: id, hours: String(hours), priceCents: String(priceCents)},
-  }, [valueEl]);
+    dataset: {
+      pick: id, hours: String(hours), priceCents: String(priceCents), seen: seenAt,
+    },
+  }, [valueEl, newBadge()]);
   const chip = el('span', {className: 'value-chip'});
   const card = el('article', {
     className: 'card',
     dataset: {
       model: 'bobcat-t770', verdict: 'match', confidence: '0.8',
-      seen: '2026-07-27T10:00:00+00:00',
+      seen: seenAt, listingId: id, dismissed: '',
       hours: String(hours), priceCents: String(priceCents),
     },
-  }, [chip]);
+  }, [chip, newBadge(), el('button', {className: 'discard'})]);
   return {li, card};
 }
 
-const svl95 = machine('svl95', 3_200_000, 2984);
+// localStorage is a browser global `_JS` reaches for directly, guarded by
+// try/catch. Node has none, so without this stand-in every discard and every
+// NEW badge would silently no-op and the tests below would prove nothing.
+const storage = new Map();
+global.localStorage = {
+  getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+  setItem(k, v) { storage.set(k, String(v)); },
+};
+
+// svl95 was first seen before the watermark below, svl90 and t770 after it —
+// so exactly two of the three are "new since you last looked". Seen dates do
+// not enter the value ranking, so this does not disturb the ordering the
+// slider test asserts.
+const OLD_SEEN = '2026-07-20T10:00:00+00:00';
+const LAST_VIEWED = '2026-07-26T00:00:00+00:00';
+storage.set('ms.lastViewed', LAST_VIEWED);
+
+const svl95 = machine('svl95', 3_200_000, 2984, OLD_SEEN);
 const svl90 = machine('svl90', 4_500_000, 1005);
 const t770 = machine('t770', 3_950_000, 2200);
 
@@ -106,20 +137,46 @@ const searchInput = el('input', {id: 'q', value: ''});
 const modelSelect = el('select', {id: 'model', value: ''});
 const sortSelect = el('select', {id: 'sort', value: 'value'});
 
+// Discard tray and the NEW counter. Named *El for the same scope-collision
+// reason as the block above: `_JS` declares `const tray`, `const trayCmd` and
+// so on for these very elements.
+const trayEl = el('div', {id: 'tray'});
+trayEl.hidden = true;
+const trayTextEl = el('span', {id: 'trayText'});
+const trayCmdEl = el('textarea', {id: 'trayCmd', value: ''});
+const trayClearEl = el('button', {id: 'trayClear'});
+const showDiscardedEl = el('button', {id: 'showDiscarded', className: 'toggle'});
+const newCountEl = el('span', {id: 'newCount'});
+const picksHeadEl = el('span', {id: 'picksHead'});
+
 const registry = new Map([
   ['cards', cardsHost], ['life', lifeInput], ['lifeOut', lifeOutputEl],
   ['q', searchInput], ['model', modelSelect], ['sort', sortSelect],
+  ['tray', trayEl], ['trayText', trayTextEl], ['trayCmd', trayCmdEl],
+  ['trayClear', trayClearEl], ['showDiscarded', showDiscardedEl],
+  ['newCount', newCountEl], ['picksHead', picksHeadEl],
 ]);
 
 const root = el('div', {}, [
   cardsHost, picksHostEl, lifeInput, lifeOutputEl, searchInput, modelSelect, sortSelect,
+  trayEl, trayTextEl, trayCmdEl, trayClearEl, showDiscardedEl, newCountEl, picksHeadEl,
 ]);
 
 global.document = {
+  // `_JS` reads the generated stamp off <body> to watermark "last looked".
+  body: el('body', {dataset: {generated: '2026-07-28T09:00:00+00:00'}}),
   getElementById(id) { return registry.get(id) || null; },
   querySelector(sel) { return root.querySelector(sel); },
   querySelectorAll(sel) { return root.querySelectorAll(sel); },
 };
+
+const built = {svl95, svl90, t770};
+function cardOf(id) { return built[id].card; }
+function pickOf(id) { return built[id].li; }
+function isNewBadged(el) {
+  return el.querySelector('.badge--new').hidden === false;
+}
+function storedValue(key) { return localStorage.getItem(key); }
 
 function pickOrder() { return picksHostEl.children.map(li => li.dataset.pick); }
 function pickValues() {

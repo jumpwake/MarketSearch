@@ -222,6 +222,54 @@ def test_already_notified_listings_are_filtered_out(store: Store):
     assert email2.sent == []
 
 
+def test_a_discarded_listing_is_never_alerted_on(store: Store):
+    """The whole point of discarding a scam is that it stops reaching you."""
+    store.dismiss("1", "scam")
+    dispatcher, email, sms = make_dispatcher(store)
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    assert dispatcher.dispatch([card], [], []) is False
+    assert email.sent == []
+    assert sms.sent == []
+
+
+def test_a_discarded_listing_is_silenced_for_price_changes_too(store: Store):
+    """A price drop on a machine already judged a scam is not news — and a
+    watched listing keeps generating change events indefinitely."""
+    store.dismiss("1", "scam")
+    dispatcher, email, _ = make_dispatcher(store)
+    change = ChangeCard(
+        listing=listing_row("1"), kind="price_change",
+        old_price_cents=3_800_000, new_price_cents=3_200_000,
+    )
+    assert dispatcher.dispatch([], [], [change]) is False
+    assert email.sent == []
+
+
+def test_discarding_one_listing_does_not_silence_the_others(store: Store):
+    store.dismiss("1", "scam")
+    dispatcher, email, _ = make_dispatcher(store)
+    cards = [
+        MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[]),
+        MatchCard(listing=listing_row("2"), extraction=extraction_row("2"), photos=[]),
+    ]
+    assert dispatcher.dispatch(cards, [], []) is True
+    assert len(email.sent) == 1
+    assert store.already_notified("2", "email", "match") is True
+    # Suppressed, not "sent" — restoring it later must let it alert again.
+    assert store.already_notified("1", "email", "match") is False
+
+
+def test_restoring_a_discarded_listing_lets_it_alert_again(store: Store):
+    store.dismiss("1", "scam")
+    card = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])
+    make_dispatcher(store)[0].dispatch([card], [], [])
+
+    store.undismiss("1")
+    dispatcher, email, _ = make_dispatcher(store)
+    assert dispatcher.dispatch([card], [], []) is True
+    assert len(email.sent) == 1
+
+
 def test_new_listing_still_sends_when_another_was_already_notified(store: Store):
     dispatcher, email, _ = make_dispatcher(store)
     first = MatchCard(listing=listing_row("1"), extraction=extraction_row("1"), photos=[])

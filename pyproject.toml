@@ -29,6 +29,10 @@ packages = ["src/marketsearch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test modules share fixtures via `from tests.test_pipeline_scan import ...`,
+# which needs the repo root importable. `python -m pytest` puts it there
+# implicitly; bare `pytest` does not. Pin it so both invocations work.
+pythonpath = ["."]
 markers = [
     "live_api: hits the real Anthropic API (costs money)",
     "live_fb: hits real Facebook (detection risk)",

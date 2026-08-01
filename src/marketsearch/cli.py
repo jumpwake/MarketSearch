@@ -323,6 +323,40 @@ def requeue_command(
 
 
 @app.command()
+def dismiss(
+    listing_ids: list[str] = typer.Argument(..., help="Listing ids, space separated."),
+    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    reason: str = typer.Option("", "--reason", help="Why, e.g. 'scam' or 'rusted out'."),
+    undo: bool = typer.Option(False, "--undo", help="Restore instead of discarding."),
+) -> None:
+    """Discard listings for good — they stop alerting and leave Top Picks.
+
+    The dashboard's discard button hands you this command pre-filled: the page
+    is a plain file with no server behind it, so the click hides the listing in
+    that browser and this is what writes the same decision to the database,
+    where the notifier can honour it too.
+    """
+    done: list[str] = []
+    unknown: list[str] = []
+
+    with Store(db) as store:
+        store.initialize()
+        for listing_id in listing_ids:
+            changed = (
+                store.undismiss(listing_id) if undo
+                else store.dismiss(listing_id, reason or None)
+            )
+            (done if changed else unknown).append(listing_id)
+
+    verb = "restored" if undo else "discarded"
+    typer.echo(f"{len(done)} listing(s) {verb}")
+    if unknown:
+        # Not an error: ids get copied around and a stale one is worth naming
+        # rather than failing the whole command over.
+        typer.echo(f"not on file, skipped: {', '.join(unknown)}")
+
+
+@app.command()
 def dashboard(
     config: Path = typer.Option(DEFAULT_CONFIG, "--config"),
     db: Path = typer.Option(DEFAULT_DB, "--db"),

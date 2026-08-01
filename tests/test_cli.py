@@ -26,6 +26,65 @@ def test_help_lists_every_command():
         assert command in result.stdout
 
 
+def _seeded_db(tmp_path: Path, *listing_ids: str) -> Path:
+    from marketsearch.models import RawListing
+
+    path = tmp_path / "m.db"
+    with Store(path) as store:
+        store.initialize()
+        for listing_id in listing_ids:
+            store.upsert_listing(
+                RawListing(
+                    listing_id=listing_id, title="T770", price_cents=3_800_000,
+                    location=None, url=f"https://example.com/{listing_id}",
+                    thumbnail_url=None, seller_name=None,
+                ),
+                "fp",
+            )
+    return path
+
+
+def test_dismiss_discards_several_listings_at_once(tmp_path: Path):
+    """The dashboard hands over one command covering everything discarded in
+    that sitting, so the command has to take a list."""
+    db = _seeded_db(tmp_path, "a", "b")
+    result = runner.invoke(app, ["dismiss", "a", "b", "--db", str(db),
+                                 "--reason", "scam"])
+    assert result.exit_code == 0
+    assert "2 listing(s) discarded" in result.stdout
+
+    with Store(db) as store:
+        store.initialize()
+        assert store.dismissed_listing_ids() == {"a", "b"}
+        assert store.get_listing("a").dismiss_reason == "scam"
+
+
+def test_dismiss_undo_restores(tmp_path: Path):
+    db = _seeded_db(tmp_path, "a")
+    runner.invoke(app, ["dismiss", "a", "--db", str(db)])
+    result = runner.invoke(app, ["dismiss", "a", "--undo", "--db", str(db)])
+    assert result.exit_code == 0
+    assert "1 listing(s) restored" in result.stdout
+
+    with Store(db) as store:
+        store.initialize()
+        assert store.dismissed_listing_ids() == set()
+
+
+def test_dismiss_names_unknown_ids_without_failing_the_command(tmp_path: Path):
+    """A copied command can carry an id that has since been pruned from the
+    dashboard's window. The listings that do exist must still be discarded."""
+    db = _seeded_db(tmp_path, "a")
+    result = runner.invoke(app, ["dismiss", "a", "ghost", "--db", str(db)])
+    assert result.exit_code == 0
+    assert "1 listing(s) discarded" in result.stdout
+    assert "ghost" in result.stdout
+
+    with Store(db) as store:
+        store.initialize()
+        assert store.dismissed_listing_ids() == {"a"}
+
+
 def test_run_reports_a_missing_config_clearly(tmp_path: Path):
     result = runner.invoke(app, ["run", "--config", str(tmp_path / "nope.yaml")])
     assert result.exit_code != 0

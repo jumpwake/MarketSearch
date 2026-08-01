@@ -220,6 +220,76 @@ def test_pick_shows_an_abbreviated_location():
     assert "Cameron, Missouri" not in picks
 
 
+# ---- discarding and the NEW badge ----------------------------------------
+
+DISCARDED = "2026-07-28T08:00:00+00:00"
+
+
+def test_a_discarded_listing_stays_in_browse_but_leaves_top_picks():
+    """Discarding hides a listing; it does not erase it. The ledger keeps
+    every listing ever seen, and a discard has to be reversible."""
+    html = render([
+        judged("keep", "bobcat-t770", 3_950_000, 2200),
+        judged("scam", "bobcat-t770", 1_500_000, 900, dismissed_at=DISCARDED),
+    ])
+    assert 'data-pick="scam"' not in html
+    assert 'data-pick="keep"' in html
+    assert 'data-listing-id="scam"' in html
+
+
+def test_a_discarded_card_is_marked_so_the_page_can_tell_it_apart():
+    """The client script layers unsaved clicks on top of this. It has to be
+    able to distinguish 'the database knows' from 'this browser knows'."""
+    html = render([judged("scam", "bobcat-t770", 1_500_000, 900,
+                          dismissed_at=DISCARDED, dismiss_reason="fake seller")])
+    card = _card_html(html, "scam")
+    assert 'data-dismissed="1"' in card
+    assert "fake seller" in card
+
+
+def test_a_live_card_is_not_marked_discarded():
+    card = _card_html(render([judged("1", "bobcat-t770", 3_950_000, 2200)]), "1")
+    assert 'data-dismissed=""' in card
+    assert 'data-dismissed="1"' not in card
+
+
+def test_a_discard_reason_from_the_database_is_escaped():
+    """Reasons are typed at a shell prompt and stored verbatim."""
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200,
+                          dismissed_at=DISCARDED,
+                          dismiss_reason="<script>alert(1)</script>")])
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_every_card_offers_a_discard_control():
+    card = _card_html(render([judged("1", "bobcat-t770", 3_950_000, 2200)]), "1")
+    assert 'class="discard"' in card
+
+
+def test_cards_and_picks_carry_what_the_new_badge_needs():
+    """The badge is decided in the browser against a watermark, so the page
+    has to ship both the per-listing date and the page's own build time."""
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200)])
+    assert f'data-generated="{STAMP}"' in html
+    assert 'data-seen="2026-07-27T10:00:00+00:00"' in _card_html(html, "1")
+    assert 'data-seen="2026-07-27T10:00:00+00:00"' in _pick_html(html, "1")
+    assert 'class="badge badge--new" hidden' in html
+
+
+def test_the_browse_heading_counts_what_has_been_discarded():
+    html = render([
+        judged("keep", "bobcat-t770", 3_950_000, 2200),
+        judged("scam", "bobcat-t770", 1_500_000, 900, dismissed_at=DISCARDED),
+    ])
+    assert "1 discarded and hidden" in html
+
+
+def test_no_discard_count_is_shown_when_nothing_is_discarded():
+    html = render([judged("1", "bobcat-t770", 3_950_000, 2200)])
+    assert "discarded and hidden" not in html
+
+
 def test_abbreviating_leaves_an_unrecognised_location_alone():
     from marketsearch.format import short_location
     assert short_location("Cameron, Missouri") == "Cameron, MO"

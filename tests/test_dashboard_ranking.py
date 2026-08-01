@@ -15,7 +15,8 @@ LIVE = {"bobcat-t770", "kubota-svl95"}
 def judged(listing_id, model_name, price_cents, hours, verdict="match",
            title="a machine", reasoning="because", unknowns=None,
            thumbnail_url="https://example.com/a.jpg",
-           location="Peoria, IL") -> JudgedListing:
+           location="Peoria, IL", dismissed_at=None,
+           dismiss_reason=None) -> JudgedListing:
     """One judged listing. `ListingRow` and `ExtractionRow` are frozen, so every
     varying field is a parameter here rather than assigned after construction."""
     return JudgedListing(
@@ -28,6 +29,7 @@ def judged(listing_id, model_name, price_cents, hours, verdict="match",
             last_seen_at="2026-07-27T10:00:00+00:00",
             last_change_check_at=None, extraction_attempts=0,
             watchlist_name="track-loaders", model_name=model_name,
+            dismissed_at=dismissed_at, dismiss_reason=dismiss_reason,
         ),
         detail=ListingDetail(
             listing_id=listing_id, description="runs strong",
@@ -82,6 +84,20 @@ def test_top_picks_excludes_models_not_in_the_live_catalog():
     """A retired search's matches must not be presented as things to go buy."""
     rows = [judged("1", "root-grapple", 300_000, None)]
     assert top_picks(rows, LIVE, 6000) == []
+
+
+def test_top_picks_excludes_discarded_listings():
+    """A discard is the user's own verdict on a machine they already looked
+    at. It outranks anything the value ranking has to say about it."""
+    rows = [
+        judged("keep", "bobcat-t770", 3_950_000, 2200),
+        judged("scam", "bobcat-t770", 1_500_000, 900,
+               dismissed_at="2026-07-28T09:00:00+00:00", dismiss_reason="scam"),
+    ]
+    picks = top_picks(rows, LIVE, 6000)
+    # The discarded one prices out as the better buy, which is exactly why it
+    # would otherwise sit at the top of the list every single time.
+    assert [p.row.listing.listing_id for p in picks] == ["keep"]
 
 
 def test_ranking_at_six_thousand_hours_prefers_low_hours():

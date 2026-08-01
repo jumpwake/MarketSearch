@@ -245,6 +245,48 @@ def test_v2_database_drops_search_name(tmp_path: Path):
     assert row.model_name == "bobcat-t770"  # the extraction history survives
 
 
+def test_v3_database_gains_the_discard_columns_without_losing_rows(tmp_path: Path):
+    """v4 adds the user's own veto. The index over dismissed_at is created
+    after the migration for exactly this case: run against a v3 table it would
+    reference a column that does not exist yet and raise, taking `initialize`
+    — and so every command — down with it."""
+    path = tmp_path / "v3.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+        CREATE TABLE listings (
+            listing_id TEXT PRIMARY KEY,
+            watchlist_name TEXT, model_name TEXT, title TEXT NOT NULL,
+            price_cents INTEGER, location TEXT, url TEXT NOT NULL,
+            thumbnail_url TEXT, seller_name TEXT, fingerprint TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT 'pending', reject_reason TEXT,
+            watched INTEGER NOT NULL DEFAULT 0, first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL, last_change_check_at TEXT,
+            extraction_attempts INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO listings (listing_id, watchlist_name, model_name,
+                              title, url, fingerprint, first_seen_at, last_seen_at)
+        VALUES ('a', 'track-loaders', 'bobcat-t770',
+                '2019 Bobcat T770', 'u', 'f', 't', 't');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with Store(path) as store:
+        store.initialize()
+        columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(listings)")}
+        row = store.get_listing("a")
+        assert store.dismissed_listing_ids() == set()
+
+    assert {"dismissed_at", "dismiss_reason"} <= columns
+    assert row.title == "2019 Bobcat T770"
+    # Every listing that predates the feature is one the user never discarded.
+    assert row.dismissed is False
+
+
 def test_a_fresh_database_has_no_search_name_column(tmp_path: Path):
     with Store(tmp_path / "fresh.db") as store:
         store.initialize()

@@ -126,12 +126,29 @@ Set `notifications.enabled: true` in `config.yaml`. That's it.
 | `marketsearch replay --search NAME --since 30d` | Re-judge stored listings. |
 | `marketsearch requeue` | Re-test stored rejections against the current catalog. No scraping. |
 | `marketsearch test-search "QUERY"` | Live search, prints parsed results. |
+| `marketsearch dismiss ID [ID...]` | Discard listings for good. `--undo` restores. |
 | `marketsearch login` | Re-authenticate after a checkpoint. |
 
 `marketsearch dashboard` — browse every judged listing in a local HTML page,
 ranked by dollars per remaining engine hour. Slide the assumed-life control to
-see how sensitive the ranking is to that assumption. Read-only; regenerate by
-re-running it.
+see how sensitive the ranking is to that assumption. Regenerate by re-running
+it.
+
+**New listings.** Anything first seen since you last opened the dashboard is
+badged **NEW**, with a count in the header. The badge clears itself on your
+next visit, so it means "you have not looked at this yet" rather than merely
+"this is recent". That watermark lives in the browser, so a different browser
+starts fresh.
+
+**Discarding.** Hover a card and hit ✕ to throw a listing out — a scam, a
+wreck, a seller you have already dealt with. It disappears from the browse list
+and from Top Picks straight away. The page is a plain file with no server
+behind it, so that click only holds in this browser; the bar that appears hands
+you the matching `marketsearch dismiss` command, and running it writes the
+decision to the database, where it also stops that listing ever alerting you
+again — including on price drops, which a saved listing would otherwise keep
+generating forever. Nothing is deleted: **show discarded** brings them back
+into view dimmed, and ✕ again offers the `--undo`.
 
 **Favourites.** Tap Save on any Marketplace listing, from any device signed
 into the same Facebook account. The next run picks it up and starts reporting

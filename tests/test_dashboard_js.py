@@ -56,11 +56,11 @@ def _label(price_cents: int, hours: int, life_hours: int) -> str:
     return f"${value:,.2f}/hr"
 
 
-def _run_apply_js() -> dict:
+def _run_js(footer: str) -> dict:
     combined = "\n".join([
         (_JS_DIR / "dom_shim.js").read_text(encoding="utf-8"),
         _JS,
-        (_JS_DIR / "assert_footer.js").read_text(encoding="utf-8"),
+        (_JS_DIR / footer).read_text(encoding="utf-8"),
     ])
     result = subprocess.run(
         [shutil.which("node"), "-"],
@@ -71,6 +71,10 @@ def _run_apply_js() -> dict:
         f"STDERR:\n{result.stderr}"
     )
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _run_apply_js() -> dict:
+    return _run_js("assert_footer.js")
 
 
 def test_the_slider_actually_reorders_top_picks():
@@ -93,3 +97,64 @@ def test_the_relabelled_pick_values_match_the_python_formula():
     for machine_id, (price_cents, hours) in _MACHINES.items():
         assert data["values6000"][machine_id] == _label(price_cents, hours, 6000)
         assert data["values10000"][machine_id] == _label(price_cents, hours, 10000)
+
+
+# ---- discarding, and "new since you last looked" -------------------------
+#
+# Same reasoning as above: these behaviours live entirely in `_JS`, so the only
+# way to prove a click on the discard button actually hides the listing — and
+# that undoing it puts the listing back — is to run the shipped script.
+
+
+@pytest.fixture(scope="module")
+def discard_run() -> dict:
+    return _run_js("assert_discard.js")
+
+
+def test_only_listings_first_seen_since_your_last_visit_are_badged_new(discard_run):
+    """The watermark is what makes NEW mean "you have not seen this yet"
+    rather than merely "this listing is recent"."""
+    assert discard_run["newBadges"] == {"svl95": False, "svl90": True, "t770": True}
+    assert discard_run["newBadgeOnPick"] is True
+    assert "2 new since you last looked" in discard_run["newCountText"]
+
+
+def test_viewing_advances_the_watermark_to_the_pages_generated_time(discard_run):
+    """Not to the clock. A listing found after this page was built has not
+    been seen yet and must still be badged NEW on the next build."""
+    assert discard_run["watermarkAfterView"] == "2026-07-28T09:00:00+00:00"
+
+
+def test_discarding_hides_the_card_and_its_top_pick(discard_run):
+    assert discard_run["trayHiddenBefore"] is True
+    assert discard_run["cardHiddenAfterDiscard"] is True
+    assert discard_run["pickHiddenAfterDiscard"] is True
+    assert discard_run["otherCardStillVisible"] is True
+
+
+def test_discarding_offers_the_command_that_makes_it_permanent(discard_run):
+    """The page cannot write to the database from a file:// URL, so the one
+    thing it must not do is imply the discard already stuck."""
+    assert discard_run["trayHiddenAfterDiscard"] is False
+    assert discard_run["trayCommand"] == "marketsearch dismiss t770"
+    assert "1 discarded" in discard_run["trayText"]
+    assert json.loads(discard_run["persisted"]) == {"discard": ["t770"], "restore": []}
+
+
+def test_discarding_a_pick_moves_the_top_picks_count_with_it(discard_run):
+    """Otherwise the heading goes on advertising a match that is no longer
+    on screen — the count is server-rendered and cannot know about a click."""
+    assert discard_run["picksHeadBefore"] == "3 matches from models in your config"
+    assert discard_run["picksHeadAfterDiscard"] == "2 matches from models in your config"
+
+
+def test_show_discarded_reveals_without_restoring(discard_run):
+    assert discard_run["cardVisibleWhenShowingDiscarded"] is True
+    assert discard_run["stillMarkedDiscarded"] is True
+
+
+def test_undoing_a_discard_restores_the_listing_and_retires_the_command(discard_run):
+    assert discard_run["cardVisibleAfterUndo"] is True
+    assert discard_run["pickVisibleAfterUndo"] is True
+    assert discard_run["trayHiddenAfterUndo"] is True
+    assert json.loads(discard_run["persistedAfterUndo"]) == {"discard": [], "restore": []}

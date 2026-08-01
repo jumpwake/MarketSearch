@@ -87,6 +87,58 @@ def test_set_watched_ids_mirrors_facebook_exactly(store: Store):
     assert store.watched_listing_ids() == {"2"}
 
 
+# ---- discarding ----------------------------------------------------------
+
+def test_dismiss_roundtrip(store: Store):
+    assert store.get_listing("1").dismissed is False
+    assert store.dismiss("1", "scam") is True
+
+    row = store.get_listing("1")
+    assert row.dismissed is True
+    assert row.dismiss_reason == "scam"
+    assert row.dismissed_at is not None
+    assert store.dismissed_listing_ids() == {"1"}
+
+
+def test_undismiss_clears_the_reason_too(store: Store):
+    store.dismiss("1", "scam")
+    assert store.undismiss("1") is True
+
+    row = store.get_listing("1")
+    assert row.dismissed is False
+    assert row.dismiss_reason is None
+    assert store.dismissed_listing_ids() == set()
+
+
+def test_dismissing_an_unknown_listing_reports_it_rather_than_raising(store: Store):
+    """Ids get copied out of the dashboard and pasted back later. A stale one
+    is worth naming, not worth failing a whole command over."""
+    assert store.dismiss("no-such-listing") is False
+    assert store.undismiss("no-such-listing") is False
+
+
+def test_dismissing_twice_is_not_an_error(store: Store):
+    """The dashboard hands out a command that may well be run twice."""
+    assert store.dismiss("1", "scam") is True
+    assert store.dismiss("1", "still a scam") is True
+    assert store.get_listing("1").dismiss_reason == "still a scam"
+
+
+def test_a_discard_survives_the_listing_being_seen_again(store: Store):
+    """upsert_listing runs on every sweep. If it cleared the discard, a live
+    listing would come straight back the next time Facebook returned it."""
+    store.dismiss("1", "scam")
+    store.upsert_listing(
+        RawListing(
+            listing_id="1", title="2019 Bobcat T770", price_cents=3_500_000,
+            location="Olathe, KS", url="https://example.com/1",
+            thumbnail_url=None, seller_name="Dale S",
+        ),
+        "fp1",
+    )
+    assert store.get_listing("1").dismissed is True
+
+
 def test_notification_idempotency(store: Store):
     assert store.already_notified("1", "email", "match") is False
     store.record_notification("1", "email", "match", "sent")

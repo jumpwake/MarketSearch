@@ -17,7 +17,7 @@ from typing import Iterable
 
 from marketsearch.models import ListingDetail, RawListing
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS listings (
     stage          TEXT NOT NULL DEFAULT 'pending',
     reject_reason  TEXT,
     watched        INTEGER NOT NULL DEFAULT 0,
+    -- Set when the user discards a listing (a scam, a wreck, a tyre-kicker).
+    -- A timestamp rather than a flag, and the row is never deleted: the
+    -- ledger's whole point is that a listing seen once stays accounted for.
+    dismissed_at   TEXT,
+    dismiss_reason TEXT,
     first_seen_at  TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
     last_change_check_at TEXT,
@@ -102,6 +107,14 @@ CREATE TABLE IF NOT EXISTS app_state (
 );
 """
 
+# Indexes over columns added by a migration, and so unsafe to put in _SCHEMA:
+# `initialize` runs _SCHEMA against the *old* table shape before `_migrate`
+# has added the column, and CREATE INDEX on a column that does not exist yet
+# raises rather than being skipped by IF NOT EXISTS.
+_LATE_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_listings_dismissed ON listings(dismissed_at);
+"""
+
 
 _last_now = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -143,6 +156,12 @@ class ListingRow:
     extraction_attempts: int
     watchlist_name: str | None = None
     model_name: str | None = None
+    dismissed_at: str | None = None
+    dismiss_reason: str | None = None
+
+    @property
+    def dismissed(self) -> bool:
+        return self.dismissed_at is not None
 
 
 @dataclass(frozen=True)
@@ -176,6 +195,8 @@ def _row_to_listing(row: sqlite3.Row) -> ListingRow:
         extraction_attempts=row["extraction_attempts"],
         watchlist_name=row["watchlist_name"],
         model_name=row["model_name"],
+        dismissed_at=row["dismissed_at"],
+        dismiss_reason=row["dismiss_reason"],
     )
 
 
@@ -207,9 +228,11 @@ class Store:
             self._conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
             )
-            self._conn.commit()
-            return
-        self._migrate(row["version"])
+        else:
+            self._migrate(row["version"])
+        # After _migrate, so every column these index exists by now.
+        self._conn.executescript(_LATE_INDEXES)
+        self._conn.commit()
 
     def _migrate(self, version: int) -> None:
         """Bring an existing database up to SCHEMA_VERSION, in place.
@@ -251,6 +274,17 @@ class Store:
             if "search_name" in columns:
                 # SQLite 3.35+ supports DROP COLUMN; Python 3.12 ships 3.4x.
                 self._conn.execute("ALTER TABLE listings DROP COLUMN search_name")
+
+        if version < 4:
+            columns = {
+                r["name"] for r in self._conn.execute("PRAGMA table_info(listings)")
+            }
+            # Both nullable with no backfill: every pre-v4 listing is, by
+            # definition, one the user never discarded.
+            if "dismissed_at" not in columns:
+                self._conn.execute("ALTER TABLE listings ADD COLUMN dismissed_at TEXT")
+            if "dismiss_reason" not in columns:
+                self._conn.execute("ALTER TABLE listings ADD COLUMN dismiss_reason TEXT")
 
         self._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         self._conn.commit()
@@ -507,6 +541,45 @@ class Store:
 
     def watched_listing_ids(self) -> set[str]:
         cur = self._conn.execute("SELECT listing_id FROM listings WHERE watched = 1")
+        return {r["listing_id"] for r in cur.fetchall()}
+
+    # ---- discarded (the user's own veto) ---------------------------------
+    #
+    # Unlike `watched`, this is not mirrored from Facebook and nothing outside
+    # this file ever clears it. A discard is a judgement the pipeline cannot
+    # make — "that one is a scam" — so it outranks every later verdict: the
+    # listing stays in the ledger, stops being alerted on, and drops out of
+    # Top Picks until the user restores it by hand.
+
+    def dismiss(self, listing_id: str, reason: str | None = None) -> bool:
+        """Discard a listing. False if no such listing is on file.
+
+        Re-dismissing an already-dismissed listing refreshes the timestamp and
+        reason rather than erroring — the CLI is expected to be handed the same
+        id twice from a copied command.
+        """
+        cur = self._conn.execute(
+            "UPDATE listings SET dismissed_at = ?, dismiss_reason = ?"
+            " WHERE listing_id = ?",
+            (utcnow(), reason, listing_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def undismiss(self, listing_id: str) -> bool:
+        """Restore a discarded listing. False if no such listing is on file."""
+        cur = self._conn.execute(
+            "UPDATE listings SET dismissed_at = NULL, dismiss_reason = NULL"
+            " WHERE listing_id = ?",
+            (listing_id,),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def dismissed_listing_ids(self) -> set[str]:
+        cur = self._conn.execute(
+            "SELECT listing_id FROM listings WHERE dismissed_at IS NOT NULL"
+        )
         return {r["listing_id"] for r in cur.fetchall()}
 
     # ---- notifications --------------------------------------------------
